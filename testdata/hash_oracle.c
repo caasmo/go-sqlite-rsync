@@ -1,7 +1,7 @@
 /* hash_oracle.c — dev-only helper that exposes the sqlite3_rsync hash
 ** engine for capturing golden test vectors.
 **
-** Build (from testdata/, or via capture.go):
+** Build (from testdata/, or via generate-hash-golden-vectors.go):
 **   cc -O1 -I ../references/sqlite-amalgamation-3530400 \
 **      hash_oracle.c \
 **      ../references/sqlite-amalgamation-3530400/sqlite3.c \

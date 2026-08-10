@@ -1,7 +1,8 @@
-// capture.go — dev-only helper that drives the C hash oracle and
-// (re)generates testdata/hash_golden_vectors.json: the frozen point-in-time
-// capture of the C engine's output that hash/hash_test.go loads.
-// Run from anywhere: go run ./testdata/capture.go
+// generate-hash-golden-vectors.go — dev-only helper that drives the C
+// hash oracle and (re)generates testdata/hash_golden_vectors.json: the
+// frozen point-in-time record of the C engine's output that
+// hash/hash_test.go loads.
+// Run from anywhere: go run ./testdata/generate-hash-golden-vectors.go
 package main
 
 import (
@@ -49,7 +50,7 @@ func main() {
 	amalg := filepath.Join(dir, "..", "references", "sqlite-amalgamation-3530400")
 	fixture := filepath.Join(dir, "hash_golden_vectors.json")
 
-	vectors, err := captureVectors(dir, amalg)
+	vectors, err := generateVectors(dir, amalg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -64,19 +65,19 @@ func main() {
 	}
 }
 
-// scriptDir returns the directory of capture.go, so the program runs
-// from anywhere.
+// scriptDir returns the directory of generate-hash-golden-vectors.go,
+// so the program runs from anywhere.
 func scriptDir() (string, error) {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
-		return "", fmt.Errorf("cannot locate capture.go")
+		return "", fmt.Errorf("cannot locate generate-hash-golden-vectors.go")
 	}
 	return filepath.Dir(file), nil
 }
 
-// captureVectors compiles the C oracle and runs it on the inputs,
-// returning one captured vector per input.
-func captureVectors(dir, amalg string) ([]vector, error) {
+// generateVectors compiles the C oracle and runs it on the inputs,
+// returning one vector per input.
+func generateVectors(dir, amalg string) ([]vector, error) {
 	if err := compileOracle(dir, amalg); err != nil {
 		return nil, err
 	}

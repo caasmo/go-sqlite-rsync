@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-// goldenVector is one row of the frozen golden capture: the input hex
+// goldenVector is one row of the frozen golden vectors: the input hex
 // and the 20-byte hash the C engine produced for it (sqlite3_rsync.c
 // L623-846, HashInit(160)).
 type goldenVector struct {
@@ -21,16 +21,16 @@ type goldenVector struct {
 	Want  string `json:"want"`
 }
 
-// goldenVectors were captured from the C hash engine via the oracle in
+// goldenVectors were generated from the C hash engine via the oracle in
 // testdata (sqlite3_rsync.c L623-846, HashInit(160)). They are frozen
-// constants: the fixture is committed, captured once, and never
+// constants: the fixture is committed, generated once, and never
 // recomputed by go test — the default test run has no C dependency.
-// Regenerate only via go run ./testdata/capture.go (see
-// testdata/README.md).
+// Regenerate only via go run ./testdata/generate-hash-golden-vectors.go
+// (see testdata/README.md).
 var goldenVectors = mustLoadGoldenVectors()
 
-// mustLoadGoldenVectors reads the frozen capture fixture written by
-// testdata/capture.go.
+// mustLoadGoldenVectors reads the frozen vectors fixture written by
+// testdata/generate-hash-golden-vectors.go.
 func mustLoadGoldenVectors() []goldenVector {
 	_, file, _, ok := runtime.Caller(0)
 	if !ok {
