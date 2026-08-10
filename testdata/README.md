@@ -26,7 +26,7 @@ The port must be byte-identical to the C tool: a Go origin must interoperate wit
 
 ### Capture instructions
 
-**When:** only after `testdata/sqlite3_rsync.c` changed (upstream sync), or as a stability check. Values must not change otherwise — `git diff testdata/golden_vectors.json` must be empty.
+**When:** only after `testdata/sqlite3_rsync.c` changed (upstream sync), or as a stability check. Values must not change otherwise — `git diff testdata/hash_golden_vectors.json` must be empty.
 
 **How:**
 
@@ -34,11 +34,11 @@ The port must be byte-identical to the C tool: a Go origin must interoperate wit
 go run ./testdata/capture.go
 ```
 
-Builds the oracle (needs `cc` + the extracted amalgamation), runs the seven inputs (defined in `capture.go`), writes `golden_vectors.json`, prints the values. If any value changed, update the Go port to match; `go test ./hash/` must pass.
+Builds the oracle (needs `cc` + the extracted amalgamation), runs the seven inputs (defined in `capture.go`), writes `hash_golden_vectors.json`, prints the values. If any value changed, update the Go port to match; `go test ./hash/` must pass.
 
 ### How the golden vectors are produced
 
-The expected values in `golden_vectors.json` are not taken from any spec or from the C source — `sqlite3_rsync.c` contains no test vectors. They are **captured from the C implementation itself**:
+The expected values in `hash_golden_vectors.json` are not taken from any spec or from the C source — `sqlite3_rsync.c` contains no test vectors. They are **captured from the C implementation itself**:
 
 1. **The inputs are our choice.** The seven inputs were selected as representative of the algorithm's behavior, by reading the C code and picking lengths that land on its branch boundaries: 159 bytes hits the special `0x86` padding case (`nLoaded == nRate-1`), 160 bytes fills exactly one rate block (Keccak step fires during input), 161 bytes crosses the rollover, 1000 bytes spans multiple blocks. Any inputs would be usable; these maximize coverage of the tricky paths.
 2. **The oracle hooks the real C code.** `hash_oracle.c` is a small C program that `#include`s `sqlite3_rsync.c` verbatim (renaming its `main` so the two do not clash) and calls the actual `HashInit`, `HashUpdate`, `HashFinal` on the decoded input bytes — the exact functions the Go port replicates.
@@ -52,8 +52,8 @@ The expected values in `golden_vectors.json` are not taken from any spec or from
 | `sqlite3_rsync.c` | yes | pinned reference C source (public domain, blessing header intact); the port spec whose line numbers all port annotations reference, and the file the oracle includes |
 | `hash_oracle.c` | yes | tiny C program: `hash_oracle <hex> [<hex>...]` prints one 40-hex-char line per input |
 | `capture.sh` | yes | legacy bash driver, superseded by `capture.go` |
-| `capture.go` | yes | Go capture driver: builds the oracle, runs the seven inputs, writes `golden_vectors.json` |
-| `golden_vectors.json` | yes | the frozen capture, loaded by `hash_test.go` |
+| `capture.go` | yes | Go capture driver: builds the oracle, runs the seven inputs, writes `hash_golden_vectors.json` |
+| `hash_golden_vectors.json` | yes | the frozen capture, loaded by `hash_test.go` |
 | `README.md` | yes | this file |
 | `hash_oracle` (binary) | no | build output of the capture |
 
