@@ -3,24 +3,48 @@ package hash
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 )
 
+// goldenVector is one row of the frozen golden capture: the input hex
+// and the 20-byte hash the C engine produced for it (sqlite3_rsync.c
+// L623-846, HashInit(160)).
+type goldenVector struct {
+	Name  string `json:"name"`
+	HexIn string `json:"hexIn"`
+	Want  string `json:"want"`
+}
+
 // goldenVectors were captured from the C hash engine via the oracle in
-// testdata (sqlite3_rsync.c L623-846, HashInit(160)).
-var goldenVectors = []struct {
-	name  string
-	hexIn string
-	want  string // 40 hex chars, captured from the C oracle
-}{
-	{name: "empty", hexIn: "", want: "529a7cd1ae4ddaca9c6e82e8614a92c77b7866f3"},
-	{name: "a", hexIn: "61", want: "226c02c25826d4cef9c4d10ef9cd6b055f18a884"},
-	{name: "abc", hexIn: "616263", want: "4817bbcb6c37e212a298c81ea7d7177fb6a2929e"},
-	{name: "159xa (padding 0x86)", hexIn: "616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161", want: "9a9ff93ca69192ea6eaf4ad4745e62b8f9f7d94f"},
-	{name: "160xa (full rate)", hexIn: "61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161", want: "a9de04c34211f84e74ff12718d7aaa38e77c6b01"},
-	{name: "161xa (rollover)", hexIn: "6161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161", want: "7e054ccec66dc966d132e77d3f4f440beac34072"},
-	{name: "500x00ff", hexIn: "00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff00ff", want: "459b6629d179ee5d79bee47b50707501b8b905e1"},
+// testdata (sqlite3_rsync.c L623-846, HashInit(160)). They are frozen
+// constants: the fixture is committed, captured once, and never
+// recomputed by go test — the default test run has no C dependency.
+// Regenerate only via go run ./testdata/capture.go (see
+// testdata/README.md).
+var goldenVectors = mustLoadGoldenVectors()
+
+// mustLoadGoldenVectors reads the frozen capture fixture written by
+// testdata/capture.go.
+func mustLoadGoldenVectors() []goldenVector {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		panic("hash: cannot locate hash_test.go")
+	}
+	fixture := filepath.Join(filepath.Dir(file), "..", "testdata", "hash_golden_vectors.json")
+	data, err := os.ReadFile(fixture)
+	if err != nil {
+		panic(fmt.Sprintf("hash: cannot load golden vectors: %v", err))
+	}
+	var vectors []goldenVector
+	if err := json.Unmarshal(data, &vectors); err != nil {
+		panic(fmt.Sprintf("hash: cannot parse golden vectors: %v", err))
+	}
+	return vectors
 }
 
 func hashOf(data []byte) [20]byte {
@@ -43,15 +67,15 @@ func hashOfChunked(data []byte, chunkSize int) [20]byte {
 
 func TestGoldenVectors(t *testing.T) {
 	for _, tc := range goldenVectors {
-		t.Run(tc.name, func(t *testing.T) {
-			input, err := hex.DecodeString(tc.hexIn)
+		t.Run(tc.Name, func(t *testing.T) {
+			input, err := hex.DecodeString(tc.HexIn)
 			if err != nil {
-				t.Fatalf("bad hex input %q: %v", tc.hexIn, err)
+				t.Fatalf("bad hex input %q: %v", tc.HexIn, err)
 			}
 			sum := hashOf(input)
 			got := hex.EncodeToString(sum[:])
-			if got != tc.want {
-				t.Fatalf("hash(%s) = %s, want %s", tc.hexIn, got, tc.want)
+			if got != tc.Want {
+				t.Fatalf("hash(%s) = %s, want %s", tc.HexIn, got, tc.Want)
 			}
 		})
 	}
