@@ -2,6 +2,7 @@ package hash
 
 import (
 	"bytes"
+	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -136,5 +137,30 @@ func TestDeterministic(t *testing.T) {
 	HashUpdate(&cx, input)
 	if got, want := HashFinal(&cx), hashOf(input); got != want {
 		t.Fatalf("nil update changed the digest: %x != %x", got, want)
+	}
+}
+
+// BenchmarkHash measures the engine's throughput on a page-sized input
+// (4096 bytes, a typical SQLite page).
+func BenchmarkHash(b *testing.B) {
+	data := bytes.Repeat([]byte{0x61}, 4096)
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		var cx HashContext
+		HashInit(&cx, 160)
+		HashUpdate(&cx, data)
+		HashFinal(&cx)
+	}
+}
+
+// BenchmarkSHA1 measures the stdlib SHA-1 throughput on the same
+// page-sized input, for comparison.
+func BenchmarkSHA1(b *testing.B) {
+	data := bytes.Repeat([]byte{0x61}, 4096)
+	b.SetBytes(int64(len(data)))
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = sha1.Sum(data)
 	}
 }

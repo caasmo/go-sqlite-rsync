@@ -51,7 +51,6 @@ The expected values in `hash_golden_vectors.json` are not taken from any spec or
 |---|---|---|
 | `sqlite3_rsync.c` | yes | pinned reference C source (public domain, blessing header intact); the port spec whose line numbers all port annotations reference, and the file the oracle includes |
 | `hash_oracle.c` | yes | tiny C program: `hash_oracle <hex> [<hex>...]` prints one 40-hex-char line per input |
-| `capture.sh` | yes | legacy bash driver, superseded by `capture.go` |
 | `capture.go` | yes | Go capture driver: builds the oracle, runs the seven inputs, writes `hash_golden_vectors.json` |
 | `hash_golden_vectors.json` | yes | the frozen capture, loaded by `hash_test.go` |
 | `README.md` | yes | this file |
