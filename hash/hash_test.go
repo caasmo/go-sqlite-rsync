@@ -82,6 +82,20 @@ func TestUpdateSplitting(t *testing.T) {
 	}
 }
 
+// ExampleHashContext shows the three calls needed to obtain a hash
+// (HashInit, HashUpdate, HashFinal). The interface looks more complex
+// than a one-shot function; the reasons: C mirror (traceability),
+// streaming (agghash updates once per row), padding (applied at
+// finalize).
+func ExampleHashContext() {
+	var cx HashContext
+	HashInit(&cx, 160)             // initialize
+	HashUpdate(&cx, []byte("abc")) // feed the data
+	sum := HashFinal(&cx)          // finalize; sum is [20]byte
+	fmt.Printf("%x\n", sum)
+	// Output: 4817bbcb6c37e212a298c81ea7d7177fb6a2929e
+}
+
 // TestDeterministic checks that hashing the same input twice yields the
 // same digest, and that a nil update (the C aData==0 early return) is a
 // no-op.

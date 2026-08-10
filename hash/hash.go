@@ -1,9 +1,7 @@
 // Package hash implements the 160-bit Keccak hash engine used by the
 // sqlite3_rsync protocol, ported faithfully from the reference C source
 // (tool/sqlite3_rsync.c, L623-846). The algorithm is byte-identical in
-// output; the structure adapts the C code (union → lanes, byte XOR →
-// bit-shift XOR, local-variable rounds, no fast path, fixed 20-byte
-// output, 6-entry RC table).
+// output.
 //
 // The port is pure uint64 value math: bytes are absorbed at canonical
 // LSB-first bit positions, so the digest is endian-independent by
@@ -13,6 +11,16 @@
 // verified by reading the C, not by tests — all golden vectors are
 // captured on little-endian machines. Only the 160-bit variant is
 // used by the protocol.
+//
+// The interface is the three-call trio HashInit, HashUpdate, HashFinal.
+// It looks more complex than a one-shot function; the reasons:
+//
+//  1. C mirror — the port mirrors sqlite3_rsync.c 1:1 (traceability:
+//     upstream sync diffs the port against the C source).
+//  2. Streaming — agghash absorbs one row per HashUpdate call and
+//     finalizes at the end.
+//  3. Padding — the 0x06/0x80 or 0x86 padding depends on the total
+//     input length, so the digest exists only after the last byte.
 package hash
 
 import "fmt"
