@@ -1,0 +1,5 @@
+references/sqlite-amalgamation-*/
+references/sqlite-src-*/
+references/sqlite-doc-*/
+references/sqlite-tools-*/
+testdata/hash_oracle
