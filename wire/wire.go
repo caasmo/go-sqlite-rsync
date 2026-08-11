@@ -13,6 +13,12 @@
 // pieces of a message: single bytes, 32-bit numbers, page sizes, and
 // chunks of data.
 //
+// Two of the messages — the informational and error messages, *_MSG
+// and *_ERROR — share one shape: a message byte, a 32-bit payload
+// length, and the payload bytes. WriteMessage and ReadMessage frame
+// those, and WriteError sends an error frame and returns it as a Go
+// error.
+//
 // A message is just one message byte followed by the fields of that
 // message. For example, the origin says hello with:
 //
@@ -23,7 +29,7 @@
 //
 // This package does not know what the messages mean — it only knows
 // how to put their bytes on the wire and read them back. The origin
-// and replica roles (package sqlitesync) decide which messages to send
+// and replica roles (package sqlitersync) decide which messages to send
 // and what to do with them.
 //
 // # Deviations from the C source
@@ -32,6 +38,10 @@
 //     power of two, or above 65536 (exponent 16, the largest the wire
 //     can carry; readPow2 rejects higher, L1028). C logs and writes a
 //     byte anyway.
+//   - ReadMessage: caps the announced payload at 1 MiB. C allocates
+//     whatever length the peer announces (L1140-1146); the cap keeps a
+//     broken or hostile peer from forcing a multi-GB allocation
+//     (TODO.md). Real messages are short; the cap is generous.
 //
 // Everything here is a faithful port of the reference C program
 // (tool/sqlite3_rsync.c, lines 79-103 and 971-1066), so a Go program
@@ -39,6 +49,7 @@
 package wire
 
 import (
+	"errors"
 	"fmt"
 	"io"
 )
@@ -218,4 +229,53 @@ func (w *Writer) WriteBytes(p []byte) error {
 		return io.ErrShortWrite
 	}
 	return nil
+}
+
+// WriteMessage writes a message with a text payload: the message byte,
+// the payload length as a 32-bit number, then the payload bytes — the
+// wire format of the C *_MSG and *_ERROR messages (sqlite3_rsync.c
+// L1081-1089, L1110-1118).
+func (w *Writer) WriteMessage(msgByte byte, payload []byte) error {
+	err := w.WriteByte(msgByte)
+	if err != nil {
+		return err
+	}
+	err = w.WriteUint32(uint32(len(payload)))
+	if err != nil {
+		return err
+	}
+	return w.WriteBytes(payload)
+}
+
+// maxMessageLen bounds the payload of *_MSG and *_ERROR messages read
+// from the peer. See the deviation note in the package doc.
+const maxMessageLen = 1 << 20
+
+// ReadMessage reads the payload of a *_MSG or *_ERROR message (the
+// message byte is already consumed). Port of the read side of
+// readAndDisplayMessage (sqlite3_rsync.c L1127-1151).
+func (r *Reader) ReadMessage() ([]byte, error) {
+	n, err := r.ReadUint32()
+	if err != nil {
+		return nil, err
+	}
+	if n > maxMessageLen {
+		return nil, fmt.Errorf("wire: message length %d exceeds %d", n, maxMessageLen)
+	}
+	return r.ReadBytes(int(n))
+}
+
+// WriteError formats an error message, writes it to the peer as an
+// *_ERROR message, and returns it as a Go error. Port of reportError
+// (sqlite3_rsync.c L1073-1095): the C function prints to stderr when
+// running locally and sends the *_ERROR message when the peer is
+// remote; the port always sends the message — the library has no
+// stderr, and the peer is always a protocol peer. msgByte selects the
+// role's error message: REPLICA_ERROR on the replica side, ORIGIN_ERROR
+// on the origin side. The C error counter (nErr) becomes the returned
+// error, joined with any error from writing the frame.
+func (w *Writer) WriteError(msgByte byte, format string, args ...any) error {
+	msg := fmt.Sprintf(format, args...)
+	sendErr := w.WriteMessage(msgByte, []byte(msg))
+	return errors.Join(errors.New(msg), sendErr)
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -356,5 +357,87 @@ func TestRoundTrip(t *testing.T) {
 	// The stream is now fully consumed.
 	if _, err := r.ReadByte(); err != io.EOF {
 		t.Fatalf("trailing ReadByte = %v, want io.EOF", err)
+	}
+}
+
+// TestWriteMessageGolden checks the *_MSG / *_ERROR framing: the
+// message byte, the payload length as a 32-bit number, then the
+// payload bytes (sqlite3_rsync.c L1081-1089, L1110-1118).
+func TestWriteMessageGolden(t *testing.T) {
+	var buf bytes.Buffer
+	err := NewWriter(&buf).WriteMessage(ReplicaMsg, []byte("abc"))
+	if err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	want := []byte{ReplicaMsg, 0x00, 0x00, 0x00, 0x03, 'a', 'b', 'c'}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("frame = %x, want %x", buf.Bytes(), want)
+	}
+}
+
+// TestReadMessage checks the read side of the *_MSG / *_ERROR framing:
+// the length and the payload, with the message byte already consumed.
+func TestReadMessage(t *testing.T) {
+	var buf bytes.Buffer
+	err := NewWriter(&buf).WriteMessage(OriginError, []byte("boom"))
+	if err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	r := NewReader(&buf)
+	b, err := r.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte: %v", err)
+	}
+	if b != OriginError {
+		t.Fatalf("message = %#x, want OriginError", b)
+	}
+	got, err := r.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if string(got) != "boom" {
+		t.Fatalf("payload = %q, want boom", got)
+	}
+}
+
+// TestReadMessageTooLong checks the payload cap: an announced length
+// above maxMessageLen fails the read instead of allocating it.
+func TestReadMessageTooLong(t *testing.T) {
+	var buf bytes.Buffer
+	err := NewWriter(&buf).WriteUint32(maxMessageLen + 1)
+	if err != nil {
+		t.Fatalf("WriteUint32: %v", err)
+	}
+	_, err = NewReader(&buf).ReadMessage()
+	if err == nil {
+		t.Fatal("ReadMessage succeeded, want it to fail")
+	}
+}
+
+// TestWriteError checks WriteError: the frame goes on the wire with
+// the formatted text, and the same text comes back as the Go error.
+func TestWriteError(t *testing.T) {
+	var buf bytes.Buffer
+	err := NewWriter(&buf).WriteError(ReplicaError, "page size mismatch; origin is %d bytes", 4096)
+	if err == nil {
+		t.Fatal("WriteError returned nil")
+	}
+	if !strings.Contains(err.Error(), "page size mismatch; origin is 4096 bytes") {
+		t.Fatalf("error = %q", err)
+	}
+	r := NewReader(&buf)
+	b, err := r.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte: %v", err)
+	}
+	if b != ReplicaError {
+		t.Fatalf("message = %#x, want ReplicaError", b)
+	}
+	got, err := r.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if string(got) != "page size mismatch; origin is 4096 bytes" {
+		t.Fatalf("payload = %q", got)
 	}
 }
