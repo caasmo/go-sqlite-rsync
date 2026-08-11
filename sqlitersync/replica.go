@@ -326,7 +326,9 @@ func replicaSide(s *rsync) (err error) {
 				if readErr != nil {
 					return readErr
 				}
-				defer pIns.Close()
+				defer func() {
+					err = errors.Join(err, pIns.Close())
+				}()
 			}
 			page, readErr := s.r.ReadBytes(s.pageSize)
 			if readErr != nil {

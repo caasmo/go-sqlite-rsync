@@ -118,7 +118,9 @@ func sendHashRows(t *testing.T, s *rsync) [][2]uint32 {
 	if err != nil {
 		t.Fatalf("SELECT sendHash: %v", err)
 	}
-	defer rows.Close()
+	defer func() {
+		_ = rows.Close()
+	}()
 	var out [][2]uint32
 	for rows.Next() {
 		var fpg, npg uint32

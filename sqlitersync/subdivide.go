@@ -1,6 +1,10 @@
 package sqlitersync
 
-import "github.com/caasmo/go-sqlite-rsync/wire"
+import (
+	"errors"
+
+	"github.com/caasmo/go-sqlite-rsync/wire"
+)
 
 // sendHashSQL computes the hash of every sendHash entry: single-page
 // hashes come from hash(data), multi-page hashes from agghash over the
@@ -27,21 +31,25 @@ const sendHashSQL = "SELECT if(npg==1," +
 // Entries whose pages do not exist on the replica yield a NULL hash
 // and no REPLICA_HASH message at all — the origin fills the gap — but
 // the expectation counters still advance (C L1653-1667).
-func (s *rsync) sendHashMessages(iHash, nHash uint32) error {
+func (s *rsync) sendHashMessages(iHash, nHash uint32) (err error) {
 	stmt, err := s.prepare(sendHashSQL)
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer func() {
+		err = errors.Join(err, stmt.Close())
+	}()
 	rows, err := stmt.Query()
 	if err != nil {
 		return s.w.WriteError(wire.ReplicaError, "SQL statement [%s] failed: %s", sendHashSQL, err)
 	}
-	defer rows.Close()
+	defer func() {
+		err = errors.Join(err, rows.Close())
+	}()
 	for rows.Next() {
 		var hash []byte
 		var fpg, npg uint32
-		err := rows.Scan(&hash, &fpg, &npg)
+		err = rows.Scan(&hash, &fpg, &npg)
 		if err != nil {
 			return s.w.WriteError(wire.ReplicaError, "SQL statement [%s] failed: %s", sendHashSQL, err)
 		}
