@@ -10,8 +10,8 @@ import (
 )
 
 // TestMessageConstants pins the wire contract values: the protocol
-// version and the message bytes. The wire is a versioned contract
-// (A23), and these values must never drift from the C source
+// version and the message bytes. The wire is a versioned contract,
+// and these values must never drift from the C source
 // (sqlite3_rsync.c L79-103).
 func TestMessageConstants(t *testing.T) {
 	cases := []struct {
@@ -46,7 +46,7 @@ func TestMessageConstants(t *testing.T) {
 }
 
 // TestWriteUint32Golden checks the big-endian byte order of the 32-bit
-// framing against a hand-computed frame (A32: WriteUint32(0x01020304)
+// framing against a hand-computed frame (WriteUint32(0x01020304)
 // -> 01 02 03 04).
 func TestWriteUint32Golden(t *testing.T) {
 	var buf bytes.Buffer
@@ -59,8 +59,8 @@ func TestWriteUint32Golden(t *testing.T) {
 	}
 }
 
-// TestWritePow2Golden checks the log2 encoding of the page size (A32:
-// WritePow2(4096) -> 0x0C), including the largest page size the wire
+// TestWritePow2Golden checks the log2 encoding of the page size
+// (WritePow2(4096) -> 0x0C), including the largest page size the wire
 // can carry (65536, exponent 16).
 func TestWritePow2Golden(t *testing.T) {
 	cases := []struct {

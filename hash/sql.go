@@ -22,8 +22,7 @@ import (
 // modernc delivers those as int64/float64 and reproducing SQLite's
 // value-to-text conversion is out of scope: the protocol only passes
 // page data — BLOBs — to hash(), and the differential suite exercises
-// only BLOB, TEXT and NULL. Numeric arguments return an error instead
-// (named gap, brainstorm Q32/A32 step 2).
+// only BLOB, TEXT and NULL. Numeric arguments return an error instead.
 func hashFunc(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 	arg := args[0]
 	// SQL NULL arrives as untyped nil (modernc functionArgs, SQLITE_NULL
@@ -189,8 +188,7 @@ func Register() error {
 // Both functions take exactly one argument and are registered as
 // SQLITE_UTF8|SQLITE_DETERMINISTIC. The C flags also include
 // SQLITE_INNOCUOUS, which modernc does not expose — harmless for the
-// protocol, whose queries use the functions only in SELECT statements
-// (named gap, brainstorm Q32/A32 step 2).
+// protocol, whose queries use the functions only in SELECT statements.
 //
 // How the algorithm's SQL uses them (sqlite3_rsync.c L1467, L1481,
 // L1632): the replica sends the hash of one page, the origin compares

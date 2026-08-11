@@ -194,7 +194,7 @@ func HashUpdate(p *HashContext, aData []byte) {
 // Only the 160-bit variant is supported: the result type is [20]byte,
 // so a context initialized with any other iSize panics instead of
 // returning silently wrong output. The general iSize formula is ported
-// in HashInit for traceability only (A23).
+// in HashInit for traceability only.
 func HashFinal(p *HashContext) [20]byte {
 	if p.iSize != 160 {
 		panic(fmt.Sprintf("hash: only the 160-bit variant is supported (iSize=%d)", p.iSize))

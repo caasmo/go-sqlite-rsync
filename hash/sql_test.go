@@ -82,8 +82,7 @@ func TestHashScalarNull(t *testing.T) {
 // TestHashScalarError proves that a numeric argument makes hash(X)
 // fail: modernc delivers it as int64, which the function rejects (the
 // C code would hash the value's text form; reproducing SQLite's
-// value-to-text conversion is out of scope — named gap, brainstorm
-// Q32/A32 step 2).
+// value-to-text conversion is out of scope).
 func TestHashScalarError(t *testing.T) {
 	db := mustOpenMemory(t)
 	var got []byte

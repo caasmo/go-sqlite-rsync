@@ -23,8 +23,7 @@ const insertPageSQL = "INSERT INTO sqlite_dbpage(pgno,data,schema)VALUES(?1,?2,'
 func replicaSide(s *rsync) (err error) {
 	// Register the hash and agghash SQL functions before the first
 	// connection opens — modernc registration is process-global and
-	// applies only to connections opened afterwards (hash.Register,
-	// impl-port-step2-sql.md).
+	// applies only to connections opened afterwards (hash.Register).
 	err = hash.Register()
 	if err != nil {
 		return err
