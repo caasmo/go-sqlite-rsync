@@ -1,0 +1,74 @@
+name: sloc
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  sloc-badge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        # During a release event, GitHub Actions check out the release tag,
+        # which leads to a "detached HEAD" state. To commit and push changes back
+        # to the repository (e.g., updating the SLOC badge), we must explicitly
+        # check out the persistent target branch.
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: master
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.x'
+
+      - name: Install scc and jq
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          go install github.com/boyter/scc/v3@v3.5.0
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+
+      - name: Run scc and format line count
+        run: |
+          # references/ holds the pinned third-party SQLite source trees and
+          # testdata/ holds a copy of the C oracle — they must not count as
+          # this repo's code.
+          scc --format json --output scc.json --exclude-dir references,testdata .
+          LINES_OF_CODE=$(jq 'map(.Code) | add' scc.json)
+          # Format the number, e.g., 11290 -> 11k, ensuring no decimals or spaces
+          FORMATTED_LINES=$(awk -v lines="$LINES_OF_CODE" 'BEGIN {if (lines >= 1000) {printf "%.0fk", lines/1000} else {print lines}}')
+          echo "LINES_OF_CODE=$LINES_OF_CODE" >> $GITHUB_ENV
+          echo "FORMATTED_LINES=$FORMATTED_LINES" >> $GITHUB_ENV
+
+      - name: Generate SLOC endpoint
+        run: |
+          # Create badge directory
+          mkdir -p .github/badges
+
+          # Create a JSON endpoint for shields.io
+          cat > .github/badges/sloc.json << EOF
+          {
+            "schemaVersion": 1,
+            "label": "total lines",
+            "message": "${{ env.FORMATTED_LINES }}",
+            "color": "brightgreen"
+          }
+          EOF
+
+      - name: Commit SLOC endpoint
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add .github/badges/sloc.json
+          if git diff --quiet --staged -- .github/badges/sloc.json; then
+            echo "No changes to SLOC endpoint"
+          else
+            git commit -m "Update total lines endpoint: ${{ env.LINES_OF_CODE }}"
+            git pull --rebase
+            git push
+          fi
