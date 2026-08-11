@@ -26,7 +26,7 @@ func openTestReplica(t *testing.T, replicaPath string) *rsync {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	s := &rsync{db: db, w: wire.NewWriter(&bytes.Buffer{})}
+	s := &rsync{db: db, w: wire.NewWriter(&bytes.Buffer{}), isReplica: true}
 	err = s.run("PRAGMA writable_schema=ON")
 	if err != nil {
 		t.Fatalf("writable_schema: %v", err)

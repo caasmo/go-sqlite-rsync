@@ -23,6 +23,7 @@ type rsync struct {
 	pageCount   uint32       // total number of pages (p->nPage)
 	walOnly     bool         // require WAL mode (p->bWalOnly)
 	commitCheck bool         // debug the communication protocol (p->bCommCheck)
+	isReplica   bool         // running on the replica side (p->isReplica)
 	wrongEnc    bool         // ATTACH failed due to wrong encoding (p->wrongEncoding)
 }
 
@@ -42,7 +43,7 @@ func attachSQL(path string) string {
 func (s *rsync) prepare(sql string) (*sql.Stmt, error) {
 	stmt, err := s.db.Prepare(sql)
 	if err != nil {
-		return nil, s.w.WriteError(wire.ReplicaError, "unable to prepare SQL [%s]: %s", sql, err)
+		return nil, s.w.WriteError(s.errMsgByte(), "unable to prepare SQL [%s]: %s", sql, err)
 	}
 	return stmt, nil
 }
@@ -61,7 +62,7 @@ func (s *rsync) run(sql string, args ...any) error {
 			s.wrongEnc = true
 			return nil
 		}
-		return s.w.WriteError(wire.ReplicaError, "SQL statement [%s] failed: %s", sql, err)
+		return s.w.WriteError(s.errMsgByte(), "SQL statement [%s] failed: %s", sql, err)
 	}
 	return nil
 }
@@ -72,7 +73,7 @@ func (s *rsync) runReturnUInt(sql string, args ...any) (uint32, error) {
 	var n uint32
 	err := s.db.QueryRow(sql, args...).Scan(&n)
 	if err != nil {
-		return 0, s.w.WriteError(wire.ReplicaError, "SQL statement [%s] failed: %s", sql, err)
+		return 0, s.w.WriteError(s.errMsgByte(), "SQL statement [%s] failed: %s", sql, err)
 	}
 	return n, nil
 }
@@ -87,7 +88,7 @@ func (s *rsync) runReturnText(sql string, args ...any) (string, error) {
 	var text string
 	err := s.db.QueryRow(sql, args...).Scan(&text)
 	if err != nil {
-		return "", s.w.WriteError(wire.ReplicaError, "SQL statement [%s] failed: %s", sql, err)
+		return "", s.w.WriteError(s.errMsgByte(), "SQL statement [%s] failed: %s", sql, err)
 	}
 	return text, nil
 }
@@ -104,4 +105,16 @@ func (s *rsync) closeDb() error {
 	err := s.db.Close()
 	s.db = nil
 	return err
+}
+
+// errMsgByte returns the *_ERROR message byte of this run's role. Port of
+// the isReplica selection in reportError (sqlite3_rsync.c L1081-1086):
+// the replica sends REPLICA_ERROR and the origin ORIGIN_ERROR. The C
+// isRemote branch — print to stderr when running locally — has no Go
+// equivalent: the library always speaks to a protocol peer.
+func (s *rsync) errMsgByte() byte {
+	if s.isReplica {
+		return wire.ReplicaError
+	}
+	return wire.OriginError
 }
