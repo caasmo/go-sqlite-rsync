@@ -15,12 +15,3 @@ Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delt
 
 - [sqlite3_rsync documentation](references/sqlite-doc-3530400/rsync.html)
 - [sqlite3_rsync source code](references/sqlite-src-3530400/tool/sqlite3_rsync.c)
-
-## Workflows
-
-The repo runs four GitHub Actions workflows:
-
-- **Test** — on push to `master` and on demand: `go test -v -cover ./...` on Go 1.25, prints per-package coverage, and publishes the total coverage as a shields.io endpoint in `.github/badges/coverage.json`.
-- **golangci-lint** — on push to `master`, on pull requests and on demand: golangci-lint v2.11.4 on stable Go.
-- **sloc** — on release and on demand: counts lines of code with `scc`, excluding the third-party `references/` and `testdata/` trees, and publishes `.github/badges/sloc.json`.
-- **Dependencies** — on release and on demand: counts the direct module dependencies from `go.mod` and publishes `.github/badges/deps.json`.
