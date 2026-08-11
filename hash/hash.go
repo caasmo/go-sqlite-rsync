@@ -3,6 +3,10 @@
 // (tool/sqlite3_rsync.c, L623-846). The algorithm is byte-identical in
 // output.
 //
+// The package also hosts the protocol's SQL layer: Register installs
+// the hash and agghash functions on the modernc sqlite driver (the
+// port of hashRegister, sqlite3_rsync.c L902-914).
+//
 // The port is pure uint64 value math: bytes are absorbed at canonical
 // LSB-first bit positions, so the digest is endian-independent by
 // construction. The C code reaches the same digest on big-endian
@@ -30,6 +34,7 @@ import "fmt"
 // [25]u64 state and a 1600-byte view is represented by the 25 lanes
 // only — the byte view is replaced by uint64 bit-shift operations,
 // which produce the same result without memory-layout assumptions.
+// The zero value is not an initialized state; call HashInit before use.
 type HashContext struct {
 	s       [25]uint64 // Keccak state: 5x5 lanes of 64 bits each
 	nRate   uint32     // bytes of input accepted per Keccak iteration

@@ -48,7 +48,20 @@ func mustLoadGoldenVectors() []goldenVector {
 	return vectors
 }
 
-func hashOf(data []byte) [20]byte {
+// hashOf returns the digest of arg, which may be a string or a []byte.
+// A string and a []byte of the same bytes hash identically (the C code
+// feeds sqlite3_value_text() or sqlite3_value_blob() into the same
+// function), so both are converted to []byte for the engine.
+func hashOf(arg any) [20]byte {
+	var data []byte
+	switch v := arg.(type) {
+	case string:
+		data = []byte(v)
+	case []byte:
+		data = v
+	default:
+		panic(fmt.Sprintf("hash: unsupported argument type %T", arg))
+	}
 	var cx HashContext
 	HashInit(&cx, 160)
 	HashUpdate(&cx, data)
