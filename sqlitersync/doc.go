@@ -43,20 +43,28 @@
 // Each side is one function; each blocks for the duration of a sync
 // and returns when the replica matches the origin:
 //
-//	Origin(rw, "origin.db", nil)   // from the side that is up to date
-//	Replica(rw, "replica.db", nil) // from the side being brought up to date
+//	Origin(ctx, rw, "origin.db", nil)   // from the side that is up to date
+//	Replica(ctx, rw, "replica.db", nil) // from the side being brought up to date
 //
 // # Deviations from the C source
 //
 //   - Context: Origin and Replica take a context.Context, the one
 //     Go-native addition (the C program has none, sqlite3_rsync.c
-//     L1363, L1756).
+//     L1363, L1756). Cancellation is checked between protocol
+//     messages: a read or write already blocked when the context is
+//     cancelled ends only when that I/O completes or the stream
+//     closes.
 //   - Errors: the C program reports failures to the peer with *_ERROR
 //     messages and keeps a global error counter; the port returns Go
 //     errors from each role and, like C, reports them to a remote peer
 //     with *_ERROR messages. A failed connection close at the end of a
 //     run is folded into the result (C's closeDb ignores sqlite3_close
 //     failures, L1310-1319).
+//   - WAL requirement: the C program syncs non-WAL databases by
+//     default (its --wal-only guard is off, sqlite3_rsync.c
+//     L2132-2135); the library requires WAL mode by default and
+//     fails the run unless AllowNonWal is set — the safe default
+//     for production databases (see the README).
 //
 // Everything here is a faithful port of the reference C program
 // (tool/sqlite3_rsync.c, lines 1156-1972), so a Go program can
