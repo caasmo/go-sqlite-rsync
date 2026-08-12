@@ -21,6 +21,34 @@ This library ports the two protocol roles of the reference C program (`tool/sqli
 
 One behavior is deliberately changed, not dropped: **WAL mode is required by default.** The C binary syncs rollback-mode databases unless `--wal-only` is given (`bWalOnly = 0`); this library inverts that — a sync of non-WAL databases fails loudly unless `AllowNonWal` is set. This is the safe fail-closed default for a production sync library: with `AllowNonWal` true, a sync against a live non-WAL database blocks that database's writes and reads for the whole run, so that path must be an explicit opt-in.
 
+## Test
+
+The test suites are pure Go, except one: the differential suite
+(`sqlitersync/differential_test.go`) runs the Go roles against the reference C
+`sqlite3_rsync` binary and requires the Go-produced replicas to be
+byte-identical to the C baseline — the port's fidelity gate. The suite is
+gated behind the `differential` build tag: plain `go test ./...` does not run
+it — it runs explicitly, at the moments the project chooses (e.g. releases).
+Within a tagged run the reference binary is a hard requirement: without it
+the suite **fails**, it never skips.
+
+The reference binary is the prebuilt `sqlite3_rsync` from the SQLite tools
+download — it is never compiled here. The tools zip for the pinned version is
+already committed in `references/`; extract it (one time, per checkout):
+
+```sh
+unzip -o references/sqlite-tools-linux-x64-3530400.zip -d references/
+export SQLITE3_RSYNC_BIN=$PWD/references/sqlite-tools-linux-x64-3530400/sqlite3_rsync
+go test -tags differential ./...
+```
+
+`SQLITE3_RSYNC_BIN` must point at an executable file; the suite is purely
+behavioral and never inspects the binary's version — any sqlite3_rsync
+binary is a valid reference as long as its replicas match. Unset, the
+differential suite fails immediately and names the variable. The other
+suites (`hash`, `wire`, the in-process `sqlitersync` tests) run under plain
+`go test` with no C dependency.
+
 ## References
 
 - [sqlite3_rsync documentation](https://sqlite.org/rsync.html)
