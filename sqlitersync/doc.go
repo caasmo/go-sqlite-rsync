@@ -62,9 +62,9 @@
 //     failures, L1310-1319).
 //   - WAL requirement: the C program syncs non-WAL databases by
 //     default (its --wal-only guard is off, sqlite3_rsync.c
-//     L2132-2135); the library requires WAL mode by default and
-//     fails the run unless AllowNonWal is set — the safe default
-//     for production databases (see the README).
+//     L2132-2135); the library requires WAL mode by default — a
+//     non-WAL run fails loudly unless AllowNonWal is set — the
+//     safe default for production databases (see the README).
 //
 // Everything here is a faithful port of the reference C program
 // (tool/sqlite3_rsync.c, lines 1156-1972), so a Go program can
