@@ -2,9 +2,11 @@ package sqlitersync
 
 import (
 	"bytes"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
+	"github.com/caasmo/go-sqlite-rsync/hash"
 	"github.com/caasmo/go-sqlite-rsync/wire"
 )
 
@@ -277,4 +279,130 @@ func TestSendHashMessagesMissingPages(t *testing.T) {
 	if c != wire.ReplicaReady {
 		t.Fatalf("message after config = %#x, want REPLICA_READY", c)
 	}
+}
+
+// openTestReplica opens the replica-side database for a test: the
+// in-memory connection with the replica file attached and the sendHash
+// table created — the part of the replicaSide setup (sqlite3_rsync.c
+// L1814-1844) that the subdivide tests need. The connection is pinned
+// to one connection, like replicaSide does.
+func openTestReplica(t *testing.T, replicaPath string) *rsync {
+	t.Helper()
+	err := hash.Register()
+	if err != nil {
+		t.Fatalf("hash.Register() = %v", err)
+	}
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	s := &rsync{db: db, w: wire.NewWriter(&bytes.Buffer{}), isReplica: true}
+	err = s.run("PRAGMA writable_schema=ON")
+	if err != nil {
+		t.Fatalf("writable_schema: %v", err)
+	}
+	err = s.run(attachSQL(replicaPath))
+	if err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	err = s.run("CREATE TABLE sendHash(" +
+		"  fpg INTEGER PRIMARY KEY," +
+		"  npg INT" +
+		")")
+	if err != nil {
+		t.Fatalf("create sendHash: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = db.Close()
+	})
+	return s
+}
+
+// pageCount returns the number of pages of the attached replica
+// database, as PRAGMA replica.page_count reports it.
+func pageCount(t *testing.T, s *rsync) uint32 {
+	t.Helper()
+	n, err := s.runReturnUInt("PRAGMA replica.page_count")
+	if err != nil {
+		t.Fatalf("page_count: %v", err)
+	}
+	return n
+}
+
+// pageHash returns the hash of one page of the attached replica
+// database: SELECT hash(data) FROM sqlite_dbpage('replica') WHERE
+// pgno=? (sqlite3_rsync.c L1631-1632).
+func pageHash(t *testing.T, s *rsync, pgno uint32) []byte {
+	t.Helper()
+	var h []byte
+	err := s.db.QueryRow("SELECT hash(data) FROM sqlite_dbpage('replica') WHERE pgno=?", pgno).Scan(&h)
+	if err != nil {
+		t.Fatalf("pageHash(%d): %v", pgno, err)
+	}
+	return h
+}
+
+// hashOfConcat hashes the concatenation of the given byte slices with
+// the Go engine — the value agghash(hash(data)) computes over a page
+// range (sqlite3_rsync.c L1633-1636).
+func hashOfConcat(parts ...[]byte) []byte {
+	var cx hash.HashContext
+	hash.HashInit(&cx, 160)
+	for _, p := range parts {
+		hash.HashUpdate(&cx, p)
+	}
+	out := hash.HashFinal(&cx)
+	return out[:]
+}
+
+// sendHashRows returns the sendHash table contents as (fpg, npg)
+// pairs, ordered by fpg. sendHash is the replica's plan of hashes to
+// send: one row per hash, with fpg the first page of the range and
+// npg the number of pages it covers.
+func sendHashRows(t *testing.T, s *rsync) [][2]uint32 {
+	t.Helper()
+	rows, err := s.db.Query("SELECT fpg, npg FROM sendHash ORDER BY fpg")
+	if err != nil {
+		t.Fatalf("SELECT sendHash: %v", err)
+	}
+	defer func() {
+		_ = rows.Close()
+	}()
+	var out [][2]uint32
+	for rows.Next() {
+		var fpg, npg uint32
+		err := rows.Scan(&fpg, &npg)
+		if err != nil {
+			t.Fatalf("Scan: %v", err)
+		}
+		out = append(out, [2]uint32{fpg, npg})
+	}
+	err = rows.Err()
+	if err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+	return out
+}
+
+// singles returns npg single-page sendHash rows starting at fpg: the
+// pairs (fpg,1), (fpg+1,1), ..., (fpg+npg-1,1). Single-page rows are
+// what subdivideHashRange produces for a range of 30 pages or fewer.
+func singles(fpg, npg uint32) [][2]uint32 {
+	out := make([][2]uint32, 0, npg)
+	for i := uint32(0); i < npg; i++ {
+		out = append(out, [2]uint32{fpg + i, 1})
+	}
+	return out
+}
+
+// thirtyChunks returns n 30-page sendHash rows starting at fpg: the
+// pairs (fpg,30), (fpg+30,30), ... . Thirty-page chunks are what
+// subdivideHashRange produces for a range of 31 to 1000 pages.
+func thirtyChunks(fpg uint32, n int) [][2]uint32 {
+	out := make([][2]uint32, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, [2]uint32{fpg + uint32(i)*30, 30})
+	}
+	return out
 }

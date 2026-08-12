@@ -3,6 +3,7 @@ package sqlitersync
 import (
 	"bytes"
 	"database/sql"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -508,4 +509,164 @@ func TestReplicaUnknownMessage(t *testing.T) {
 	if !strings.Contains(msg, "Unknown message") {
 		t.Fatalf("REPLICA_ERROR = %q, want unknown message", msg)
 	}
+}
+
+// scriptedOrigin drives the origin side of the wire protocol against a
+// replicaSide run, over an in-memory net.Pipe connection. It is
+// scripted: each test decides what to send and what to expect, instead
+// of computing hashes like the real origin (step 5).
+type scriptedOrigin struct {
+	t *testing.T
+	r *wire.Reader
+	w *wire.Writer
+}
+
+// newScriptedOrigin connects to a replicaSide run and returns the
+// origin side of the pipe plus the channel carrying the run's result.
+func newScriptedOrigin(t *testing.T, s *rsync) (*scriptedOrigin, <-chan error) {
+	t.Helper()
+	originConn, replicaConn := net.Pipe()
+	s.r = wire.NewReader(replicaConn)
+	s.w = wire.NewWriter(replicaConn)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- replicaSide(s)
+		_ = replicaConn.Close()
+	}()
+	t.Cleanup(func() {
+		_ = originConn.Close()
+	})
+	return &scriptedOrigin{t: t, r: wire.NewReader(originConn), w: wire.NewWriter(originConn)}, errCh
+}
+
+// begin sends ORIGIN_BEGIN with the given protocol, page size and
+// page count (sqlite3_rsync.c L1405-1408).
+func (o *scriptedOrigin) begin(protocol byte, pageSize int, pageCount uint32) {
+	o.t.Helper()
+	err := o.w.WriteByte(wire.OriginBegin)
+	if err != nil {
+		o.t.Fatalf("OriginBegin: %v", err)
+	}
+	err = o.w.WriteByte(protocol)
+	if err != nil {
+		o.t.Fatalf("protocol: %v", err)
+	}
+	err = o.w.WritePow2(pageSize)
+	if err != nil {
+		o.t.Fatalf("page size: %v", err)
+	}
+	err = o.w.WriteUint32(pageCount)
+	if err != nil {
+		o.t.Fatalf("page count: %v", err)
+	}
+}
+
+// readReplicaBegin reads a REPLICA_BEGIN protocol counter-proposal and
+// returns the proposed version (sqlite3_rsync.c L1798-1810).
+func (o *scriptedOrigin) readReplicaBegin() byte {
+	o.t.Helper()
+	c, err := o.r.ReadByte()
+	if err != nil {
+		o.t.Fatalf("ReadByte: %v", err)
+	}
+	if c != wire.ReplicaBegin {
+		o.t.Fatalf("message = %#x, want REPLICA_BEGIN", c)
+	}
+	proto, err := o.r.ReadByte()
+	if err != nil {
+		o.t.Fatalf("ReadByte: %v", err)
+	}
+	return proto
+}
+
+// readReady consumes replica messages until REPLICA_READY and returns
+// the number of REPLICA_HASH messages seen. REPLICA_CONFIG messages
+// are skipped.
+func (o *scriptedOrigin) readReady() int {
+	o.t.Helper()
+	nHash := 0
+	for {
+		c, err := o.r.ReadByte()
+		if err != nil {
+			o.t.Fatalf("ReadByte: %v", err)
+		}
+		switch c {
+		case wire.ReplicaConfig:
+			_, err := o.r.ReadUint32()
+			if err != nil {
+				o.t.Fatalf("ReadUint32: %v", err)
+			}
+			_, err = o.r.ReadUint32()
+			if err != nil {
+				o.t.Fatalf("ReadUint32: %v", err)
+			}
+		case wire.ReplicaHash:
+			_, err := o.r.ReadBytes(20)
+			if err != nil {
+				o.t.Fatalf("ReadBytes: %v", err)
+			}
+			nHash++
+		case wire.ReplicaReady:
+			return nHash
+		default:
+			o.t.Fatalf("unexpected message 0x%02x", c)
+		}
+	}
+}
+
+// page sends an ORIGIN_PAGE message with the given page content
+// (sqlite3_rsync.c L1578-1580).
+func (o *scriptedOrigin) page(pgno uint32, data []byte) {
+	o.t.Helper()
+	err := o.w.WriteByte(wire.OriginPage)
+	if err != nil {
+		o.t.Fatalf("OriginPage: %v", err)
+	}
+	err = o.w.WriteUint32(pgno)
+	if err != nil {
+		o.t.Fatalf("pgno: %v", err)
+	}
+	err = o.w.WriteBytes(data)
+	if err != nil {
+		o.t.Fatalf("page data: %v", err)
+	}
+}
+
+// txn sends an ORIGIN_TXN message (sqlite3_rsync.c L1587-1588).
+func (o *scriptedOrigin) txn(pageCount uint32) {
+	o.t.Helper()
+	err := o.w.WriteByte(wire.OriginTxn)
+	if err != nil {
+		o.t.Fatalf("OriginTxn: %v", err)
+	}
+	err = o.w.WriteUint32(pageCount)
+	if err != nil {
+		o.t.Fatalf("page count: %v", err)
+	}
+}
+
+// end sends ORIGIN_END (sqlite3_rsync.c L1592).
+func (o *scriptedOrigin) end() {
+	o.t.Helper()
+	err := o.w.WriteByte(wire.OriginEnd)
+	if err != nil {
+		o.t.Fatalf("OriginEnd: %v", err)
+	}
+}
+
+// readError reads a REPLICA_ERROR message and returns its text.
+func (o *scriptedOrigin) readError() string {
+	o.t.Helper()
+	c, err := o.r.ReadByte()
+	if err != nil {
+		o.t.Fatalf("ReadByte: %v", err)
+	}
+	if c != wire.ReplicaError {
+		o.t.Fatalf("message = %#x, want REPLICA_ERROR", c)
+	}
+	msg, err := o.r.ReadMessage()
+	if err != nil {
+		o.t.Fatalf("ReadMessage: %v", err)
+	}
+	return string(msg)
 }

@@ -77,3 +77,10 @@ The C program's `-v` summary reports bytes sent/received, bytes/sec and speedup 
 - `wire/wire.go` — `Reader`/`Writer`, the natural counting points for bytes sent and received
 - `references/sqlite-src-3530400/tool/sqlite3_rsync.c` — L2392-2423, the C `-v` summary
 
+# sqlitersync: test helpers not shared must go from file
+
+Test helpers that are not shared across test files must live in the file that uses them, not in the shared helpers file. `helpers_test.go` holds only helpers used by more than one test file; a helper used by a single file belongs in that file.
+
+- `sqlitersync/helpers_test.go` — the shared helpers (`createDB`, `assertSynced`, `assertIntegrity`, `xColumn`, `dbInfo`, ...); must not accumulate file-specific helpers
+- `sqlitersync/differential_test.go` — build-tagged (step 7); carries the differential-only helpers (`copyFile`, `rewriteRows`, `build*Pair`, `assertByteSynced`, `assertWalSynced`, `differentialScenario`) in the file itself
+

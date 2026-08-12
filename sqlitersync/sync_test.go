@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -363,4 +364,45 @@ func TestSyncNonWalRejected(t *testing.T) {
 	if replicaErr == nil {
 		t.Fatal("Replica succeeded, want not-in-WAL error")
 	}
+}
+
+// runSync runs a full origin↔replica sync over an in-memory pipe and
+// returns both roles' errors. Each side runs in its own goroutine and
+// blocks until the sync ends; the caller owns the pipe, so each
+// goroutine closes its end after its role returns, which ends the
+// other side's blocked read.
+func runSync(t *testing.T, ctx context.Context, originPath, replicaPath string, opts *Options) (originErr, replicaErr error) {
+	t.Helper()
+	originConn, replicaConn := net.Pipe()
+	errCh := make(chan error, 2)
+	go func() {
+		errCh <- Origin(ctx, originConn, originPath, opts)
+		_ = originConn.Close()
+	}()
+	go func() {
+		errCh <- Replica(ctx, replicaConn, replicaPath, opts)
+		_ = replicaConn.Close()
+	}()
+	originErr = <-errCh
+	replicaErr = <-errCh
+	return originErr, replicaErr
+}
+
+// countingRW wraps an io.ReadWriter and counts the bytes written, so
+// a test can prove that a sync sent no pages.
+type countingRW struct {
+	rw io.ReadWriter
+	n  int64
+}
+
+// Read reads from the wrapped stream.
+func (c *countingRW) Read(p []byte) (int, error) {
+	return c.rw.Read(p)
+}
+
+// Write writes to the wrapped stream and counts the bytes.
+func (c *countingRW) Write(p []byte) (int, error) {
+	n, err := c.rw.Write(p)
+	c.n += int64(n)
+	return n, err
 }
