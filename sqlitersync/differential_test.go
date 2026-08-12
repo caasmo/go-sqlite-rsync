@@ -447,9 +447,9 @@ type differentialScenario struct {
 	assert   func(t *testing.T, originPath, replicaPath, baselinePath string)
 }
 
-// assertByteSynced asserts a byte-comparable sync result: the replica
-// is masked-identical to the origin and to the C-vs-C baseline
-// replica, has the origin's page size and page count, and passes
+// assertByteSynced checks a byte-comparable sync: the replica must
+// equal the origin and the baseline replica (except the header bytes
+// SQLite rewrites), keep the origin's page size and count, and pass
 // integrity_check.
 func assertByteSynced(t *testing.T, originPath, replicaPath, baselinePath string) {
 	t.Helper()
@@ -532,9 +532,9 @@ func TestDifferential(t *testing.T) {
 	}
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
-			// Baseline: the C binary against itself. The assertion
-			// runs here too; its baseline comparison compares the
-			// replica with itself, a no-op.
+			// Combo 1: C syncs C. The replica it produces becomes the
+			// baseline that the two Go combos below must match
+			// byte-for-byte.
 			originPath, replicaPath := sc.build(t, t.TempDir())
 			syncCWithC(t, originPath, replicaPath, sc.protocol)
 			sc.assert(t, originPath, replicaPath, replicaPath)
