@@ -14,6 +14,8 @@ The engine API (`HashContext`, `HashInit`, `HashUpdate`, `HashFinal`) is exporte
 - `hash/sql.go` — `hashFunc` and `agghashAggregate`, the only production callers
 - `hash/hash_test.go` — golden-vector tests use the engine directly (same package, so unexporting keeps them working)
 
+Decision (2026-08-12): keep exported. The sqlitersync tests also call the engine directly (`originPageHash` in `origin_test.go`, `hashOfConcat` in `subdivide_test.go`) to compute the wire hashes that drive scripted syncs; unexporting would break them.
+
 # wire: ReadBytes negative-length panic and unbounded allocation (for consideration only)
 
 `wire.ReadBytes(nByte int)` (planned, impl-port-step3-wire.md Phase 1) allocates its result with `make([]byte, nByte)`, so a negative `nByte` panics the process. The C source never crashes here: `readBytes` (sqlite3_rsync.c L1048-1054) fills a caller-supplied buffer with `fread`, and a negative count is just a huge size_t that fails and gets logged. A peer-controlled length read as `uint32` (message lengths, steps 4-5) could also be huge — up to ~4 GB — so `ReadBytes` would attempt a multi-GB allocation.
