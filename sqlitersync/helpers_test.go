@@ -18,7 +18,23 @@ import (
 )
 
 // createDB creates a SQLite database file with one table holding n
-// rows.
+// rows. The table is t(x): one column named x, filled with the numbers
+// 0, 1, 2, ..., n-1.
+//
+// The tests need pairs of databases that are identical in shape but
+// can differ in content, so n is the only knob: a small n makes a
+// small file (50 or 100 rows fit on a single page), a large n makes a
+// file with many pages (the protocol works per page, and the tests
+// that exercise grouping need hundreds of pages). Tests that want the
+// replica to differ from the origin open the replica file and run
+// UPDATE t SET x = x + 1000 on it.
+//
+// The rows are inserted from Go, in one transaction: a prepared
+// statement is executed once per row, and the transaction is committed
+// at the end. One transaction means one commit, whatever n is — the
+// inserts are atomic (either all n rows land or none do) and the file
+// is synced to disk once. Without the transaction, every row would be
+// its own autocommit insert with its own disk sync.
 func createDB(t *testing.T, path string, n int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
@@ -30,11 +46,27 @@ func createDB(t *testing.T, path string, n int) {
 		t.Fatalf("CREATE TABLE: %v", err)
 	}
 	if n > 0 {
-		_, err = db.Exec(
-			"WITH RECURSIVE c(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM c WHERE n<?)"+
-				"INSERT INTO t(x) SELECT n FROM c", n-1)
+		tx, err := db.Begin()
 		if err != nil {
-			t.Fatalf("INSERT: %v", err)
+			t.Fatalf("Begin: %v", err)
+		}
+		stmt, err := tx.Prepare("INSERT INTO t(x) VALUES(?)")
+		if err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		for i := 0; i < n; i++ {
+			_, err = stmt.Exec(i)
+			if err != nil {
+				t.Fatalf("INSERT: %v", err)
+			}
+		}
+		err = stmt.Close()
+		if err != nil {
+			t.Fatalf("Close statement: %v", err)
+		}
+		err = tx.Commit()
+		if err != nil {
+			t.Fatalf("Commit: %v", err)
 		}
 	}
 	err = db.Close()
@@ -82,7 +114,7 @@ func openTestReplica(t *testing.T, replicaPath string) *rsync {
 }
 
 // pageCount returns the number of pages of the attached replica
-// database.
+// database, as PRAGMA replica.page_count reports it.
 func pageCount(t *testing.T, s *rsync) uint32 {
 	t.Helper()
 	n, err := s.runReturnUInt("PRAGMA replica.page_count")
@@ -118,7 +150,10 @@ func hashOfConcat(parts ...[]byte) []byte {
 	return out[:]
 }
 
-// sendHashRows returns the sendHash table contents ordered by fpg.
+// sendHashRows returns the sendHash table contents as (fpg, npg)
+// pairs, ordered by fpg. sendHash is the replica's plan of hashes to
+// send: one row per hash, with fpg the first page of the range and
+// npg the number of pages it covers.
 func sendHashRows(t *testing.T, s *rsync) [][2]uint32 {
 	t.Helper()
 	rows, err := s.db.Query("SELECT fpg, npg FROM sendHash ORDER BY fpg")
@@ -144,7 +179,9 @@ func sendHashRows(t *testing.T, s *rsync) [][2]uint32 {
 	return out
 }
 
-// singles returns npg single-page sendHash rows starting at fpg.
+// singles returns npg single-page sendHash rows starting at fpg: the
+// pairs (fpg,1), (fpg+1,1), ..., (fpg+npg-1,1). Single-page rows are
+// what subdivideHashRange produces for a range of 30 pages or fewer.
 func singles(fpg, npg uint32) [][2]uint32 {
 	out := make([][2]uint32, 0, npg)
 	for i := uint32(0); i < npg; i++ {
@@ -153,7 +190,9 @@ func singles(fpg, npg uint32) [][2]uint32 {
 	return out
 }
 
-// thirtyChunks returns n 30-page sendHash rows starting at fpg.
+// thirtyChunks returns n 30-page sendHash rows starting at fpg: the
+// pairs (fpg,30), (fpg+30,30), ... . Thirty-page chunks are what
+// subdivideHashRange produces for a range of 31 to 1000 pages.
 func thirtyChunks(fpg uint32, n int) [][2]uint32 {
 	out := make([][2]uint32, 0, n)
 	for i := 0; i < n; i++ {
