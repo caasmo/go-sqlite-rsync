@@ -562,14 +562,14 @@ func TestReplicaWalOnly(t *testing.T) {
 	}
 }
 
-// TestReplicaCommitCheck checks the commit-check mode
+// TestReplicaCommCheck checks the commcheck mode
 // (sqlite3_rsync.c L1763-1768): the replica announces its
 // configuration with REPLICA_MSG and stops with REPLICA_END.
-func TestReplicaCommitCheck(t *testing.T) {
+func TestReplicaCommCheck(t *testing.T) {
 	dir := t.TempDir()
 	replicaPath := filepath.Join(dir, "replica.db")
 
-	s := &rsync{replicaPath: replicaPath, protocol: wire.ProtocolVersion, commitCheck: true}
+	s := &rsync{replicaPath: replicaPath, protocol: wire.ProtocolVersion, commCheck: true}
 	o, done := newScriptedOrigin(t, s)
 
 	c, err := o.r.ReadByte()

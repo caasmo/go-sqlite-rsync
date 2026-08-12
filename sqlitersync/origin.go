@@ -61,7 +61,7 @@ func originSide(s *rsync) (err error) {
 		return err
 	}
 	s.isReplica = false
-	if s.commitCheck {
+	if s.commCheck {
 		// C: infoMsg + ORIGIN_END (sqlite3_rsync.c L1378-1382). The
 		// port always speaks to a protocol peer — it has no stderr or
 		// stdout channel — so the message goes on the wire like C's

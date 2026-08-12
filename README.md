@@ -11,6 +11,14 @@
 
 Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delta sync of live SQLite databases — origin/replica roles over any io.ReadWriter, transport-agnostic.
 
+## Porting notes
+
+This library ports the two protocol roles of the reference C program (`tool/sqlite3_rsync.c`, in `references/`): the origin side (L1363-1608) and the replica side (L1756-1972). It does not port the program's command-line layer, `main()` (L2068-2430). The `Origin` and `Replica` functions replace it, and three things the C program does there are deliberately left out:
+
+- **Starting the other side.** The C tool accepts filenames like `user@host:file`, launches the remote program itself over SSH (`popen2`, with the `-ssh`, `-port`, `-exe`, `-remote-debugfile`, `-logfile` and `-arg-escape-check` options) and connects the pair over pipes (L2042-2067, L2255-2383). The library takes a connected `io.ReadWriter` for each side — the caller decides the transport: a pipe, an SSH channel, anything readable and writable.
+- **Printing to a terminal.** When the C program runs a role in its own process — the local side of an SSH pair — errors and informational messages print to stderr instead of going over the wire. The library always speaks to a protocol peer: failures travel as `*_ERROR` messages and come back to the caller as Go errors.
+- **Reporting progress.** When a sync ends, the C program can print a summary of bytes sent and received, transfer speed and speedup (the `-v` option, L2392-2423). The library has no display channel: each role returns an error, and the caller decides what to report.
+
 ## References
 
 - [sqlite3_rsync documentation](references/sqlite-doc-3530400/rsync.html)

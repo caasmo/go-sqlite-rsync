@@ -29,7 +29,7 @@ func replicaSide(s *rsync) (err error) {
 		return err
 	}
 	s.isReplica = true
-	if s.commitCheck {
+	if s.commCheck {
 		// C: infoMsg + REPLICA_END (sqlite3_rsync.c L1763-1768). The
 		// port always speaks to a protocol peer — it has no stderr or
 		// stdout channel — so the message goes on the wire like C's

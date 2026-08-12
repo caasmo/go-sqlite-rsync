@@ -565,14 +565,14 @@ func TestOriginMissingOrigin(t *testing.T) {
 	}
 }
 
-// TestOriginCommitCheck checks the commit-check mode (sqlite3_rsync.c
+// TestOriginCommCheck checks the commcheck mode (sqlite3_rsync.c
 // L1378-1382): the origin announces its configuration with ORIGIN_MSG
 // and stops with ORIGIN_END.
-func TestOriginCommitCheck(t *testing.T) {
+func TestOriginCommCheck(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 
-	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion, commitCheck: true}
+	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion, commCheck: true}
 	o, done := newScriptedReplica(t, s)
 
 	msg := o.readMsg()

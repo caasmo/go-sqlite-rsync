@@ -22,7 +22,7 @@ type rsync struct {
 	pageSize    int          // database page size (p->szPage)
 	pageCount   uint32       // total number of pages (p->nPage)
 	walOnly     bool         // require WAL mode (p->bWalOnly)
-	commitCheck bool         // debug the communication protocol (p->bCommCheck)
+	commCheck bool           // debug the communication protocol (p->bCommCheck)
 	isReplica   bool         // running on the replica side (p->isReplica)
 	wrongEnc    bool         // ATTACH failed due to wrong encoding (p->wrongEncoding)
 }
