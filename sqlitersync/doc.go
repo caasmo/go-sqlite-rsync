@@ -48,6 +48,12 @@
 //
 // # Deviations from the C source
 //
+//   - Command-line layer: the C program's main() starts the peer
+//     process over SSH, prints informational messages to a terminal
+//     and reports transfer statistics; the library omits all of that —
+//     the caller supplies a connected io.ReadWriter for each side, and
+//     each role returns an error for the caller to report (see the
+//     README's porting notes).
 //   - Context: Origin and Replica take a context.Context, the one
 //     Go-native addition (the C program has none, sqlite3_rsync.c
 //     L1363, L1756). Cancellation is checked between protocol

@@ -10,7 +10,23 @@
 [![GitHub Release](https://img.shields.io/github/v/release/caasmo/go-sqlite-rsync?style=flat)]()
 [![Built Go](https://img.shields.io/badge/built_with-Go-00ADD8.svg?style=flat)]()
 
-Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delta sync of live SQLite databases — origin/replica roles over any io.ReadWriter, transport-agnostic.
+Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delta sync of live SQLite databases — origin/replica roles over any io.ReadWriter, transport-agnostic. Byte-exact against the reference C implementation, with a few documented deviations (see [Porting notes](#porting-notes)).
+
+## Contents
+
+- [The sqlite3_rsync protocol](#the-sqlite3_rsync-protocol)
+- [Porting notes](#porting-notes)
+- [Differential Test](#differential-test)
+- [References](#references)
+- [SQLite sync approaches compared](#sqlite-sync-approaches-compared)
+
+## The sqlite3_rsync protocol
+
+This library implements the [sqlite3_rsync protocol](https://sqlite.org/rsync.html), a wire protocol designed by the SQLite developers for keeping two copies of a SQLite database in sync over a network. It is inspired by — and named after — rsync, but it is a custom protocol, not the rsync protocol. Like rsync it transfers only what changed, but it is specific to SQLite files; ordinary rsync does not understand SQLite and cannot be used for this — the protocol's official page explains [why](https://sqlite.org/rsync.html#why_can_t_i_just_use_ordinary_rsync_).
+
+A sync has two roles. The **origin** holds the authoritative copy of the database; the **replica** is the copy being brought up to date. The replica sends cryptographic hashes of the pages of its database file to the origin; the origin compares them with its own pages and sends back only the pages that differ — or asks for finer-grained hashes when a hash covering several pages does not match. Only the pages that differ travel over the wire, so traffic scales with the differences between the databases, not with their size.
+
+Because it works on a live database file at page level, a sync can run while other programs are connected to either database. The replica ends up as a consistent snapshot of the origin as it was when the sync started — something plain rsync cannot guarantee, since it can copy pages from different transactions and produce a corrupt file.
 
 ## Porting notes
 
@@ -22,35 +38,32 @@ This library ports the two protocol roles of the reference C program (`tool/sqli
 
 One behavior is deliberately changed, not dropped: **WAL mode is required by default.** The C binary syncs rollback-mode databases unless `--wal-only` is given (`bWalOnly = 0`); this library inverts that — a sync of non-WAL databases fails loudly unless `AllowNonWal` is set. This is the safe fail-closed default for a production sync library: with `AllowNonWal` true, a sync against a live non-WAL database blocks that database's writes and reads for the whole run, so that path must be an explicit opt-in.
 
-## Test
+Two smaller Go-native changes: **context support** — `Origin` and `Replica` take a `context.Context` (the C program has none, L1363, L1756); cancellation is checked between protocol messages, so a read or write already blocked when the context is cancelled ends only when that I/O completes or the stream closes. **Error handling** — each role returns Go errors and, like C, reports them to a remote peer with `*_ERROR` messages; a failed connection close at the end of a run is folded into the result, where C's `closeDb` ignores `sqlite3_close` failures (L1310-1319).
 
-The test suites are pure Go, except one: the differential suite
-(`sqlitersync/differential_test.go`) runs the Go roles against the reference C
-`sqlite3_rsync` binary and requires the Go-produced replicas to be
-byte-identical to the C baseline — the port's fidelity gate. The suite is
-gated behind the `differential` build tag: plain `go test ./...` does not run
-it — it runs explicitly, at the moments the project chooses (e.g. releases).
-Within a tagged run the reference binary is a hard requirement: without it
-the suite **fails**, it never skips.
+## Differential Test
 
-The reference binary is the prebuilt `sqlite3_rsync` from the SQLite tools
-download — it is never compiled here. The tools zip for the pinned version is
-already committed in `references/`; extract it (one time, per checkout):
+The suite (`sqlitersync/differential_test.go`) runs the Go roles against the reference C `sqlite3_rsync` binary and requires the Go-produced replicas to be byte-identical to the C baseline — the port's fidelity gate. Download the tools zip for the pinned version from [sqlite.org/download.html](https://www.sqlite.org/download.html), extract it, and run:
 
 ```sh
-unzip -o references/sqlite-tools-linux-x64-3530400.zip -d references/
-export SQLITE3_RSYNC_BIN=$PWD/references/sqlite-tools-linux-x64-3530400/sqlite3_rsync
+unzip -o sqlite-tools-linux-x64-3530400.zip
+export SQLITE3_RSYNC_BIN=$PWD/sqlite-tools-linux-x64-3530400/sqlite3_rsync
 go test -tags differential ./...
 ```
-
-`SQLITE3_RSYNC_BIN` must point at an executable file; the suite is purely
-behavioral and never inspects the binary's version — any sqlite3_rsync
-binary is a valid reference as long as its replicas match. Unset, the
-differential suite fails immediately and names the variable. The other
-suites (`hash`, `wire`, the in-process `sqlitersync` tests) run under plain
-`go test` with no C dependency.
 
 ## References
 
 - [sqlite3_rsync documentation](https://sqlite.org/rsync.html)
 - [sqlite3_rsync source code](https://sqlite.org/src/file/tool/sqlite3_rsync.c)
+
+## SQLite sync approaches compared
+
+Copying a live SQLite database is not a raw file copy — the WAL and `-shm` files change continuously, and a plain copy can tear pages from different transactions. The four SQLite-aware approaches below work through SQLite's own machinery, leaving WAL and `-shm` intact: the SQLite Online Backup API, the `VACUUM INTO` command, [Litestream](https://litestream.io), and the sqlite3_rsync protocol. All assume WAL mode. The origin is the production database, so lock impact and CPU on it matter most: the Online Backup API, `VACUUM INTO` and sqlite3_rsync run on demand and produce a snapshot, while Litestream runs continuously for near-real-time replication.
+
+| Method | Locking | Origin CPU | Data transferred | Remote |
+|---|---|---|---|---|
+| Online Backup API | Writers never blocked; read lock held only briefly between `step()` calls | Low; reads the whole database in chunks | Whole database, every run | No — copies one database to one local file |
+| `VACUUM INTO` | Writers never blocked, but one continuous read transaction pins the WAL snapshot, so the WAL grows on long runs | Heaviest; rebuilds every b-tree and reads the whole database | Whole database, every run | No — writes a local file |
+| Litestream | Writers never blocked, but holds a long-running read transaction that prevents other processes from checkpointing, so the WAL grows; Litestream checkpoints it itself (PASSIVE; blocking TRUNCATE only as an emergency) | Low, but continuous — tails the WAL forever | Only new WAL frames, continuously | Yes — continuous replication to S3-compatible, Azure, GCS, SFTP or local storage |
+| sqlite3_rsync | Writers never blocked; one continuous read transaction (same WAL-growth caveat); replica is read-only during the sync | Light; hashes pages and copies only changed pages, all writes land on the replica | Only changed pages plus hash exchanges — a tiny fraction when the databases are nearly identical | Yes — remote sync over SSH; local sync over a pipe; one side must be local |
+
+Ranking of impact on the origin: `VACUUM INTO` > Online Backup API > sqlite3_rsync; lock-wise they are equivalent in WAL mode, and the only differentiator is the WAL-growth risk of the continuous-read approaches, negligible on fast local syncs.
