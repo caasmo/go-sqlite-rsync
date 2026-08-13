@@ -1,0 +1,60 @@
+name: sqlite3_rsync version
+
+on:
+  workflow_dispatch:
+
+jobs:
+  version-badge:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ref: master
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Read pinned sqlite3_rsync version
+        run: |
+          if [ ! -f testdata/sqlite3_rsync_version.json ]; then
+            echo "testdata/sqlite3_rsync_version.json not found; skipping badge update"
+            exit 0
+          fi
+          SQLITE_VERSION=$(jq -r .sqlite_version testdata/sqlite3_rsync_version.json)
+          echo "SQLITE_VERSION=$SQLITE_VERSION" >> $GITHUB_ENV
+          echo "sqlite3_rsync version: $SQLITE_VERSION"
+
+      - name: Generate version endpoint
+        if: env.SQLITE_VERSION != ''
+        run: |
+          # Create badge directory
+          mkdir -p .github/badges
+
+          # Create a JSON endpoint for shields.io
+          cat > .github/badges/sqlite3_rsync.json << EOF
+          {
+            "schemaVersion": 1,
+            "label": "upstream",
+            "message": "sqlite3_rsync ${{ env.SQLITE_VERSION }}",
+            "color": "blue"
+          }
+          EOF
+
+      - name: Commit version endpoint
+        if: env.SQLITE_VERSION != ''
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+
+          git add .github/badges/sqlite3_rsync.json
+          if git diff --quiet --staged -- .github/badges/sqlite3_rsync.json; then
+            echo "No changes to version endpoint"
+          else
+            git commit -m "Update sqlite3_rsync version endpoint: ${{ env.SQLITE_VERSION }}"
+            git pull --rebase
+            git push
+          fi
