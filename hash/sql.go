@@ -23,6 +23,11 @@ import (
 // value-to-text conversion is out of scope: the protocol only passes
 // page data — BLOBs — to hash(), and the differential suite exercises
 // only BLOB, TEXT and NULL. Numeric arguments return an error instead.
+//
+// A second modernc boundary: TEXT arrives converted with C strlen
+// (libc.GoString), so an embedded NUL byte truncates the hashed bytes,
+// where the C code hashes the full sqlite3_value_bytes() length. The
+// protocol never hashes TEXT, so this gap is not exercised either.
 func hashFunc(_ *sqlite.FunctionContext, args []driver.Value) (driver.Value, error) {
 	arg := args[0]
 	// SQL NULL arrives as untyped nil (modernc functionArgs, SQLITE_NULL
@@ -92,8 +97,9 @@ type agghashAggregate struct {
 
 // Step accumulates one row. Port of agghashStep (sqlite3_rsync.c
 // L877-894): NULL arguments are skipped, BLOBs are hashed byte-for-byte
-// and TEXT as its text bytes. Numeric arguments return an error (same
-// named gap as hashFunc).
+// and TEXT as its text bytes. Numeric arguments return an error and
+// TEXT with an embedded NUL byte arrives truncated (same named gaps as
+// hashFunc).
 func (a *agghashAggregate) Step(_ *sqlite.FunctionContext, args []driver.Value) error {
 	arg := args[0]
 	// SQL NULL arrives as untyped nil (modernc functionArgs, SQLITE_NULL

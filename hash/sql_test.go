@@ -172,8 +172,8 @@ func TestAggHashError(t *testing.T) {
 // TestRegisterIdempotent checks the Register contract: repeated calls
 // succeed (the registration happens once per process; modernc would
 // reject a second registration of the same name). The cold path is
-// exercised by the first mustOpenMemory call of the package; by the
-// time this test runs, Register has already fired once.
+// covered by whichever test calls Register first; this test only
+// proves that later calls are idempotent.
 func TestRegisterIdempotent(t *testing.T) {
 	err := Register()
 	if err != nil {

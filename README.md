@@ -14,19 +14,25 @@ Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delt
 
 ## Contents
 
-- [The sqlite3_rsync protocol](#the-sqlite3_rsync-protocol)
+- [Usage](#usage)
 - [Porting notes](#porting-notes)
 - [Differential Test](#differential-test)
-- [References](#references)
+- [The sqlite3_rsync protocol](#the-sqlite3_rsync-protocol)
 - [SQLite sync approaches compared](#sqlite-sync-approaches-compared)
 
-## The sqlite3_rsync protocol
+## Usage
 
-This library implements the [sqlite3_rsync protocol](https://sqlite.org/rsync.html), a wire protocol designed by the SQLite developers for keeping two copies of a SQLite database in sync over a network. It is inspired by — and named after — rsync, but it is a custom protocol, not the rsync protocol. Like rsync it transfers only what changed, but it is specific to SQLite files; ordinary rsync does not understand SQLite and cannot be used for this — the protocol's official page explains [why](https://sqlite.org/rsync.html#why_can_t_i_just_use_ordinary_rsync_).
+A sync is two calls — one for each side of the protocol — and both block until the sync ends:
 
-A sync has two roles. The **origin** holds the authoritative copy of the database; the **replica** is the copy being brought up to date. The replica sends cryptographic hashes of the pages of its database file to the origin; the origin compares them with its own pages and sends back only the pages that differ — or asks for finer-grained hashes when a hash covering several pages does not match. Only the pages that differ travel over the wire, so traffic scales with the differences between the databases, not with their size.
+```go
+import "github.com/caasmo/go-sqlite-rsync/sqlitersync"
 
-Because it works on a live database file at page level, a sync can run while other programs are connected to either database. The replica ends up as a consistent snapshot of the origin as it was when the sync started — something plain rsync cannot guarantee, since it can copy pages from different transactions and produce a corrupt file.
+origin, replica := net.Pipe() // any io.ReadWriter works
+go sqlitersync.Origin(ctx, origin, "origin.db", nil)
+err := sqlitersync.Replica(ctx, replica, "replica.db", nil)
+```
+
+`Origin` runs on the side that owns the up-to-date database. It opens `originPath`, compares the hashes the replica sends against its own pages, and writes back only the pages that differ. `Replica` runs on the side being brought up to date. It opens `replicaPath`, sends the hashes of its pages, and applies the pages it receives in one transaction, ending as a consistent snapshot of the origin. Both take the same arguments: a `context.Context` (`nil` is fine — it is never cancelled), the `io.ReadWriter` connecting the two sides, the database path, and an `*Options` (`nil` selects the defaults — latest protocol version, WAL mode required). For a remote sync the two calls run on different machines and `rw` is the SSH channel instead of the pipe. The roles never close the stream; the caller does, and that also ends the other side's run.
 
 ## Porting notes
 
@@ -50,14 +56,17 @@ export SQLITE3_RSYNC_BIN=$PWD/sqlite-tools-linux-x64-3530400/sqlite3_rsync
 go test -tags differential ./...
 ```
 
-## References
+## The sqlite3_rsync protocol
 
-- [sqlite3_rsync documentation](https://sqlite.org/rsync.html)
-- [sqlite3_rsync source code](https://sqlite.org/src/file/tool/sqlite3_rsync.c)
+This library implements the [sqlite3_rsync protocol](https://sqlite.org/rsync.html), a wire protocol designed by the SQLite developers for keeping two copies of a SQLite database in sync over a network. It is inspired by — and named after — rsync, but it is a custom protocol, not the rsync protocol. Like rsync it transfers only what changed, but it is specific to SQLite files; ordinary rsync does not understand SQLite and cannot be used for this — the protocol's official page explains [why](https://sqlite.org/rsync.html#why_can_t_i_just_use_ordinary_rsync_).
+
+A sync has two roles. The **origin** holds the authoritative copy of the database; the **replica** is the copy being brought up to date. The replica sends cryptographic hashes of the pages of its database file to the origin; the origin compares them with its own pages and sends back only the pages that differ — or asks for finer-grained hashes when a hash covering several pages does not match. Only the pages that differ travel over the wire, so traffic scales with the differences between the databases, not with their size.
+
+Because it works on a live database file at page level, a sync can run while other programs are connected to either database. The replica ends up as a consistent snapshot of the origin as it was when the sync started — something plain rsync cannot guarantee, since it can copy pages from different transactions and produce a corrupt file.
 
 ## SQLite sync approaches compared
 
-Copying a live SQLite database is not a raw file copy — the WAL and `-shm` files change continuously, and a plain copy can tear pages from different transactions. The four SQLite-aware approaches below work through SQLite's own machinery, leaving WAL and `-shm` intact: the SQLite Online Backup API, the `VACUUM INTO` command, [Litestream](https://litestream.io), and the sqlite3_rsync protocol. All assume WAL mode. The origin is the production database, so lock impact and CPU on it matter most: the Online Backup API, `VACUUM INTO` and sqlite3_rsync run on demand and produce a snapshot, while Litestream runs continuously for near-real-time replication.
+Copying a live SQLite database is not a raw file copy — the WAL and `-shm` files change continuously, and a plain copy can tear pages from different transactions. The four SQLite-aware approaches below work through SQLite's own machinery, leaving WAL and `-shm` intact: the [SQLite Online Backup API](https://www.sqlite.org/backup.html), the [`VACUUM INTO` command](https://www.sqlite.org/lang_vacuum.html), [Litestream](https://litestream.io), and the [sqlite3_rsync protocol](https://sqlite.org/rsync.html). All assume WAL mode. The origin is the production database, so lock impact and CPU on it matter most: the Online Backup API, `VACUUM INTO` and sqlite3_rsync run on demand and produce a snapshot, while Litestream runs continuously for near-real-time replication.
 
 | Method | Locking | Origin CPU | Data transferred | Remote |
 |---|---|---|---|---|
@@ -65,5 +74,3 @@ Copying a live SQLite database is not a raw file copy — the WAL and `-shm` fil
 | `VACUUM INTO` | Writers never blocked, but one continuous read transaction pins the WAL snapshot, so the WAL grows on long runs | Heaviest; rebuilds every b-tree and reads the whole database | Whole database, every run | No — writes a local file |
 | Litestream | Writers never blocked, but holds a long-running read transaction that prevents other processes from checkpointing, so the WAL grows; Litestream checkpoints it itself (PASSIVE; blocking TRUNCATE only as an emergency) | Low, but continuous — tails the WAL forever | Only new WAL frames, continuously | Yes — continuous replication to S3-compatible, Azure, GCS, SFTP or local storage |
 | sqlite3_rsync | Writers never blocked; one continuous read transaction (same WAL-growth caveat); replica is read-only during the sync | Light; hashes pages and copies only changed pages, all writes land on the replica | Only changed pages plus hash exchanges — a tiny fraction when the databases are nearly identical | Yes — remote sync over SSH; local sync over a pipe; one side must be local |
-
-Ranking of impact on the origin: `VACUUM INTO` > Online Backup API > sqlite3_rsync; lock-wise they are equivalent in WAL mode, and the only differentiator is the WAL-growth risk of the continuous-read approaches, negligible on fast local syncs.

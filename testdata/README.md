@@ -91,5 +91,5 @@ Note: `references/sqlite-tools-linux-x64-3530400.zip` holds only prebuilt binari
 
 1. Download the new `sqlite-src-*.zip` from <https://www.sqlite.org/download.html>.
 2. Extract and copy: `cp references/sqlite-src-*/tool/sqlite3_rsync.c testdata/sqlite3_rsync.c`.
-3. Run `go run ./testdata/generate-hash-golden-vectors.go`. If any vector changed, the Go port must be updated to match (differential rule, Q23); the algorithm is not expected to change, but line numbers do, so update the L-number annotations in the port files.
+3. Run `go run ./testdata/generate-hash-golden-vectors.go`. If any vector changed, the Go port must be updated to match (differential rule: the port must match the C tool byte-for-byte); the algorithm is not expected to change, but line numbers do, so update the L-number annotations in the port files.
 4. `go test ./hash/` must pass; commit the new pinned file, updated vectors and annotations together.
