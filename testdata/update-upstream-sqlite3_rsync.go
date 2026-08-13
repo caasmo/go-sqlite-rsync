@@ -1,20 +1,25 @@
-// update-upstream-sqlite3_rsync is the deterministic front half of the
-// upstream-sync procedure: it brings the pinned reference C source up
-// to date with the latest sqlite3_rsync from sqlite.org.
+// update-upstream-sqlite3_rsync keeps the pinned reference C source
+// (testdata/sqlite3_rsync.c) current with the latest sqlite3_rsync
+// from sqlite.org.
 //
 // What it does, in order:
 //  1. find the latest SQLite release on sqlite.org
 //  2. download the sqlite-src zip and verify its SHA3-256 hash
-//  3. copy tool/sqlite3_rsync.c from the zip into testdata/
-//  4. record the version in testdata/sqlite3_rsync_version.json
-//  5. report every file it created or updated
-//  6. print the audit steps that follow
+//  3. compare the zip's tool/sqlite3_rsync.c with the pinned source
+//  4. identical: the pin is already current — only the version record
+//     in testdata/sqlite3_rsync_version.json may move to the latest
+//     release, then exit
+//  5. different: copy the new source into testdata/, record the
+//     release, report every file created or updated, and print the
+//     audit steps that follow
 //
 // The audit itself — diffing the old and new C files, categorizing the
 // changes (hash / wire / SQL / roles / CLI-only), refactoring the Go
 // port and regenerating the golden vectors — is deliberately not
-// automated: it is a judgment call. See testdata/README.md
-// "Upstream sync" and the upstream-sync guide.
+// automated: it is a judgment call. The differential gate (building
+// the reference binary and running it against the Go port) is not part
+// of this tool yet. See testdata/README.md "Upstream sync" and the
+// upstream-sync guide.
 //
 // Run from the repo root: go run ./testdata/update-upstream-sqlite3_rsync.go
 //
@@ -39,6 +44,7 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/sha3"
 	"encoding/hex"
 	"encoding/json"
@@ -77,9 +83,11 @@ type sqliteSrc struct {
 }
 
 // versionInfo is the shape of testdata/sqlite3_rsync_version.json, the
-// record of which SQLite release the pinned C source came from.
-// SyncDate is the day the sync ran, not the release date — the
-// download page does not carry release dates for source zips.
+// record of the latest SQLite release the sync ran against. The pinned
+// source is current as of that release — byte-identical to the
+// release's tool/sqlite3_rsync.c. SyncDate is the day the sync ran,
+// not the release date — the download page does not carry release
+// dates for source zips.
 type versionInfo struct {
 	SQLiteVersion string `json:"sqlite_version"` // e.g. "3.53.4"
 	URL           string `json:"url"`
@@ -100,7 +108,8 @@ func main() {
 		fatal("%v", err)
 	}
 	fmt.Printf("latest SQLite release: %s\n", src.version)
-	// Step 3: download the source zip into a temp dir and verify it.
+	// Step 3: download the source zip into a temp dir, verify it, and
+	// read tool/sqlite3_rsync.c out of it.
 	tmp, err := os.MkdirTemp("", "sqlite-src-*")
 	if err != nil {
 		fatal("create temp dir: %v", err)
@@ -116,17 +125,41 @@ func main() {
 	if err != nil {
 		fatal("%v", err)
 	}
-	// Step 4: extract the pinned C source into testdata/.
-	err = extractSource(zipPath, sourcePath)
+	newSource, err := extractRSyncSource(zipPath)
 	if err != nil {
 		fatal("%v", err)
 	}
-	// Step 5: record which release the pinned source came from.
-	err = writeVersionJSON(versionPath, src)
+	// Step 4: compare the new source with the pinned one.
+	changed, err := compareSource(newSource)
 	if err != nil {
 		fatal("%v", err)
 	}
-	// Step 6: report and point at the audit.
+	if !changed {
+		// The pin is already current: only the version record may
+		// move to the latest release. No copy, no audit.
+		updated, err := writeVersionJSON(versionPath, src)
+		if err != nil {
+			fatal("%v", err)
+		}
+		fmt.Println("tool/sqlite3_rsync.c is byte-identical to the pinned source")
+		if updated {
+			fmt.Printf("updated %s\n", versionPath)
+		} else {
+			fmt.Printf("%s already current\n", versionPath)
+		}
+		return
+	}
+	// Step 5: the pinned source differs — copy the new one, record the
+	// release, report and point at the audit. (Building the reference
+	// binary and running the differential gate is not designed yet.)
+	err = os.WriteFile(sourcePath, newSource, 0o644)
+	if err != nil {
+		fatal("write %s: %v", sourcePath, err)
+	}
+	_, err = writeVersionJSON(versionPath, src)
+	if err != nil {
+		fatal("%v", err)
+	}
 	report(sourcePath, versionPath)
 	suggestAudit(src)
 }
@@ -175,6 +208,19 @@ func parseSQLiteSrc(page string) (sqliteSrc, error) {
 		return sqliteSrc{version: fields[1], url: fields[2], sha3: fields[4]}, nil
 	}
 	return sqliteSrc{}, fmt.Errorf("download page format changed: no %s row", srcZipGlob)
+}
+
+// compareSource reports whether the pinned source differs from
+// newSource. A missing pin (first sync) counts as different.
+func compareSource(newSource []byte) (changed bool, err error) {
+	pinned, err := os.ReadFile(sourcePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s: %v", sourcePath, err)
+	}
+	return !bytes.Equal(newSource, pinned), nil
 }
 
 // matchesGlob reports whether name matches the sqlite-src-*.zip shape:
@@ -226,12 +272,12 @@ func download(url, wantSHA3, dest string) (err error) {
 	return nil
 }
 
-// extractSource copies tool/sqlite3_rsync.c out of the source zip into
-// dest, byte for byte.
-func extractSource(zipPath, dest string) (err error) {
+// extractRSyncSource returns tool/sqlite3_rsync.c from the source zip,
+// byte for byte.
+func extractRSyncSource(zipPath string) (source []byte, err error) {
 	r, err := zip.OpenReader(zipPath)
 	if err != nil {
-		return fmt.Errorf("open %s: %v", zipPath, err)
+		return nil, fmt.Errorf("open %s: %v", zipPath, err)
 	}
 	defer func() {
 		err = errors.Join(err, r.Close())
@@ -240,36 +286,29 @@ func extractSource(zipPath, dest string) (err error) {
 		if !strings.HasSuffix(f.Name, "tool/sqlite3_rsync.c") {
 			continue
 		}
-		return writeZipEntry(f, dest)
+		rc, err := f.Open()
+		if err != nil {
+			return nil, fmt.Errorf("open %s: %v", f.Name, err)
+		}
+		data, readErr := io.ReadAll(rc)
+		closeErr := rc.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read %s: %v", f.Name, readErr)
+		}
+		if closeErr != nil {
+			return nil, fmt.Errorf("close %s: %v", f.Name, closeErr)
+		}
+		return data, nil
 	}
-	return fmt.Errorf("no tool/sqlite3_rsync.c in %s", zipPath)
+	return nil, fmt.Errorf("no tool/sqlite3_rsync.c in %s", zipPath)
 }
 
-// writeZipEntry writes one zip file's content to dest.
-func writeZipEntry(f *zip.File, dest string) error {
-	rc, err := f.Open()
-	if err != nil {
-		return fmt.Errorf("open %s: %v", f.Name, err)
-	}
-	file, err := os.Create(dest)
-	if err != nil {
-		return fmt.Errorf("create %s: %v", dest, err)
-	}
-	_, copyErr := io.Copy(file, rc)
-	closeFileErr := file.Close()
-	closeRCErr := rc.Close()
-	if copyErr != nil {
-		return fmt.Errorf("extract %s: %v", f.Name, copyErr)
-	}
-	if closeFileErr != nil {
-		return fmt.Errorf("close %s: %v", dest, closeFileErr)
-	}
-	return closeRCErr
-}
-
-// writeVersionJSON records which SQLite release the sync produced, so
-// the repo always states what it ports.
-func writeVersionJSON(dest string, src sqliteSrc) error {
+// writeVersionJSON records the latest SQLite release in dest, unless
+// dest already holds exactly that record — then it writes nothing. It
+// reports whether it wrote, so the caller can say which happened. The
+// record and the pinned source stay in step: both come from the same
+// download in the same run.
+func writeVersionJSON(dest string, src sqliteSrc) (updated bool, err error) {
 	info := versionInfo{
 		SQLiteVersion: src.version,
 		URL:           fullURL(src.url),
@@ -278,14 +317,21 @@ func writeVersionJSON(dest string, src sqliteSrc) error {
 	}
 	data, err := json.MarshalIndent(info, "", "  ")
 	if err != nil {
-		return err
+		return false, err
 	}
 	data = append(data, '\n')
+	existing, err := os.ReadFile(dest)
+	if err == nil && bytes.Equal(existing, data) {
+		return false, nil
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, fmt.Errorf("read %s: %v", dest, err)
+	}
 	err = os.WriteFile(dest, data, 0o644)
 	if err != nil {
-		return fmt.Errorf("write %s: %v", dest, err)
+		return false, fmt.Errorf("write %s: %v", dest, err)
 	}
-	return nil
+	return true, nil
 }
 
 // report prints the files the sync created or updated.
