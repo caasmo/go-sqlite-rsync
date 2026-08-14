@@ -103,3 +103,22 @@ The differential assertions compare replicas byte-for-byte with a header mask (`
 - `hash/sql.go` — `agghash`, the existing whole-file hash tool; `sqlite_dbpage` iterates pages
 - `brainstorm-*` redesign discussion: assertions on whole-file agghash replace the masked binary comparison
 
+# sqlitersync: createDB must go go go go, no in code
+
+`createDB` has no place in the codebase: the differential constructors all use `createFixtureDB` (the uniform fixture), and `createDB` remains only because four other test files still call it. Delete `createDB` from `helpers_test.go` and migrate every caller. Not mechanical: `createFixtureDB` rows are byte-identical (x always 1, 4000-byte blob) and the t(x)-based tests depend on distinct x values (0..n-1), `UPDATE t SET x = x + 1000`, whole-file byte equality and `xColumn ORDER BY x` — each file needs a design decision.
+
+- `sqlitersync/helpers_test.go` — `createDB` (L30), the helper to delete
+- `sqlitersync/differential_test.go` — the nine `New*` constructors already use `createFixtureDB` (impl-testdifferential-refactor-design.md Phase 1)
+- `sqlitersync/sync_test.go` — 15 `createDB` call sites (t(x) semantics)
+- `sqlitersync/replica_test.go` — 14 `createDB` call sites (t(x) semantics)
+- `sqlitersync/origin_test.go` — 10 `createDB` call sites (t(x) semantics)
+- `sqlitersync/subdivide_test.go` — 3 `createDB` call sites (t(x) semantics)
+
+# sqlitersync: assertIntegrity must disappear
+
+`assertIntegrity` has no place in the codebase: the differential refactor replaces its use with the `AssertIntegrity` method on `Result` (assert methods live on the result, not as blob helpers), and the helper remains only because `sync_test.go` still calls it. Delete `assertIntegrity` from `helpers_test.go` and migrate the remaining call sites.
+
+- `sqlitersync/helpers_test.go` — `assertIntegrity` (L142), the helper to delete
+- `sqlitersync/sync_test.go` — 5 call sites (L94, L166, L187, L208, L320)
+- `sqlitersync/differential_test.go` — `assertByteSynced` (L658) uses it; impl-testdifferential-refactor-design.md deletes that use and replaces it with the `AssertIntegrity` method on `Result`
+

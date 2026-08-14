@@ -2,12 +2,15 @@
 
 // differential_test.go is the hard fidelity gate of the port: it runs
 // the Go roles against the reference C sqlite3_rsync binary and
-// requires the Go-produced replicas to be byte-identical (masked) to
-// the C baseline. The build tag keeps this file out of plain go test
-// runs; it runs explicitly with -tags differential, at the moments
-// the project chooses. Within a tagged run the reference binary is a
-// hard requirement — these tests fail without it, they never skip
-// (see the README test section).
+// requires every Go-produced replica to hold the origin's content and
+// to match the C binary's own replica on the same fixture, byte for
+// byte on the wire — except the WAL scenario, whose content is checked
+// through its rows (its writes land in the -wal file) and whose
+// reference replica is not compared. The build tag keeps this file out
+// of plain go test runs; it runs explicitly with -tags differential,
+// at the moments the project chooses. Within a tagged run the
+// reference binary is a hard requirement — these tests fail without
+// it, they never skip (see the README test section).
 package sqlitersync
 
 import (
@@ -22,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caasmo/go-sqlite-rsync/hash"
 	"github.com/caasmo/go-sqlite-rsync/wire"
 )
 
@@ -99,7 +103,7 @@ func runSqlite3_rsync(ctx context.Context, role, originPath, replicaPath string,
 // needs traffic in both directions, so every runner here creates two
 // pipes: syncGoWithC wires one pipe from the Go role into the C
 // process's stdin and one from the C process's stdout back to the Go
-// role; syncCWithC feeds each process's stdout into the other's
+// role; syncCToC feeds each process's stdout into the other's
 // stdin.
 func newPipe(t *testing.T) (read, write *os.File) {
 	t.Helper()
@@ -167,24 +171,37 @@ func (c *pipeConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// syncCounters is the Go role's wire traffic in one syncGoWithC run,
-// for the differential wire assertions: the bytes it wrote and read
-// through the pipe, and the number of REPLICA_CONFIG and
-// ORIGIN_DETAIL messages it wrote.
-type syncCounters struct {
+// traffic is the wire traffic of one Go run: the bytes the Go role
+// wrote and read through the pipe, and the number of REPLICA_CONFIG
+// and ORIGIN_DETAIL messages it wrote — the signature of the agghash
+// round.
+type traffic struct {
 	writes          int64
 	reads           int64
 	agghashMessages int64
 }
 
+// result is what one Go run produced: the scenario it ran, the run's
+// outcome and the wire traffic. The assert methods of the differential
+// suite live on it; each reads what it checks from the run's fields,
+// plus the parameters it takes.
+type result struct {
+	t        *testing.T
+	scenario *scenario
+	goErr    error
+	stderr   string
+	traffic  traffic
+}
+
 // syncGoWithC runs a real sync: the Go library plays one role, the C
-// binary the other, connected over pipes. It fails the test if either
-// side fails. goRole picks the Go role — "origin" or "replica"; the C
-// binary always plays the other.
+// binary the other, connected over pipes. goRole picks the Go role —
+// "origin" or "replica"; the C binary always plays the other.
 //
-// The returned counters are the Go role's wire traffic, for the
-// differential wire assertions.
-func syncGoWithC(t *testing.T, goRole, originPath, replicaPath string, protocol int) syncCounters {
+// It returns the run's result: the scenario it ran, the Go role's
+// error (nil on a clean run), the C process's stderr and the wire
+// traffic. Harness failures — the process not starting, or not
+// exiting after a clean Go run — fail the test directly.
+func syncGoWithC(t *testing.T, goRole string, sc *scenario) result {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -200,7 +217,7 @@ func syncGoWithC(t *testing.T, goRole, originPath, replicaPath string, protocol 
 	// stdoutWrite; the Go role reads it through stdoutRead.
 	stdoutRead, stdoutWrite := newPipe(t)
 	var stderr bytes.Buffer
-	cmd := runSqlite3_rsync(ctx, otherRole, originPath, replicaPath, protocol)
+	cmd := runSqlite3_rsync(ctx, otherRole, sc.origin, sc.replica, sc.protocol)
 	// Passing stdinRead as cmd.Stdin makes the C process inherit its
 	// own copy of the fd: it reads its stdin from it.
 	cmd.Stdin = stdinRead
@@ -267,41 +284,57 @@ func syncGoWithC(t *testing.T, goRole, originPath, replicaPath string, protocol 
 	go func() {
 		var runErr error
 		if goRole == originRole {
-			runErr = Origin(ctx, conn, originPath, &Options{AllowNonWal: true, Protocol: protocol})
+			runErr = Origin(ctx, conn, sc.origin, &Options{AllowNonWal: true, Protocol: sc.protocol})
 		} else {
-			runErr = Replica(ctx, conn, replicaPath, &Options{AllowNonWal: true, Protocol: protocol})
+			runErr = Replica(ctx, conn, sc.replica, &Options{AllowNonWal: true, Protocol: sc.protocol})
 		}
 		errCh <- runErr
 		_ = stdinWrite.Close()
 	}()
 
-	// Wait for the goroutine — the Go role — to finish; this is the
-	// error it returned.
+	// Wait for the goroutine — the Go role — to finish.
 	goErr := <-errCh
 	if goErr != nil {
+		// The C process would wait forever for input that never comes:
+		// kill it. The kill makes cmd.Wait below return "signal: killed"
+		// — expected when the Go role failed, so it is not fatal then.
 		_ = cmd.Process.Kill()
 	}
 
 	// Wait for the C process to exit and reap it.
 	waitErr := cmd.Wait()
 	_ = stdoutRead.Close()
-
-	if goErr != nil {
-		t.Fatalf("Go %s: %v\nC stderr:\n%s", goRole, goErr, stderr.String())
-	}
-	if waitErr != nil {
+	if goErr == nil && waitErr != nil {
 		t.Fatalf("C %s: %v\nstderr:\n%s", otherRole, waitErr, stderr.String())
 	}
 
-	// The Go role's wire I/O finishes before the goroutine's channel
-	// send, and the send happens-before the receive, so reading the
-	// counters after <-errCh is race-free.
-	return syncCounters{writes: conn.writes, reads: conn.reads, agghashMessages: conn.agghashMessages}
+	return result{
+		t:        t,
+		scenario: sc,
+		goErr:    goErr,
+		stderr:   stderr.String(),
+		traffic:  traffic{writes: conn.writes, reads: conn.reads, agghashMessages: conn.agghashMessages},
+	}
 }
 
-// syncCWithC runs the C binary against itself — the baseline run, the
-// reference every Go result is compared with. Two C processes play the
-// two roles, connected over pipes in a loop: the origin's stdout feeds
+// syncGoToC runs the scenario with the Go library as origin and the C
+// binary as replica, and returns the run's result.
+func syncGoToC(t *testing.T, sc *scenario) result {
+	t.Helper()
+	return syncGoWithC(t, originRole, sc)
+}
+
+// syncCToGo runs the scenario with the C binary as origin and the Go
+// library as replica, and returns the run's result.
+func syncCToGo(t *testing.T, sc *scenario) result {
+	t.Helper()
+	return syncGoWithC(t, replicaRole, sc)
+}
+
+// syncCToC runs the C binary against itself on the scenario's files —
+// the reference run: the replica it produces is the reference replica
+// every Go result is compared with. Two C processes play the two
+// roles, connected over pipes in a loop: the origin's stdout feeds
 // the replica's stdin, and the replica's stdout feeds the origin's
 // stdin — the same pipe layout the C launcher builds for a local pair.
 //
@@ -309,7 +342,7 @@ func syncGoWithC(t *testing.T, goRole, originPath, replicaPath string, protocol 
 // once a side is done: every pipe end is released as soon as the two
 // processes start, and then the run is just two waits. A hung process
 // is killed by the shared 2-minute context timeout.
-func syncCWithC(t *testing.T, originPath, replicaPath string, protocol int) {
+func syncCToC(t *testing.T, sc *scenario) string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -323,14 +356,14 @@ func syncCWithC(t *testing.T, originPath, replicaPath string, protocol int) {
 	replicaStdoutRead, replicaStdoutWrite := newPipe(t)
 
 	var originStderr, replicaStderr bytes.Buffer
-	originCmd := runSqlite3_rsync(ctx, originRole, originPath, replicaPath, protocol)
+	originCmd := runSqlite3_rsync(ctx, originRole, sc.origin, sc.replica, sc.protocol)
 	// The origin reads the replica's stdout pipe as its stdin, and
 	// writes its stdout to the pipe the replica reads as its stdin.
 	originCmd.Stdin = replicaStdoutRead
 	originCmd.Stdout = originStdoutWrite
 	originCmd.Stderr = &originStderr
 
-	replicaCmd := runSqlite3_rsync(ctx, replicaRole, originPath, replicaPath, protocol)
+	replicaCmd := runSqlite3_rsync(ctx, replicaRole, sc.origin, sc.replica, sc.protocol)
 	// The replica reads the origin's stdout pipe as its stdin, and
 	// writes its stdout to the pipe the origin reads as its stdin.
 	replicaCmd.Stdin = originStdoutRead
@@ -361,6 +394,7 @@ func syncCWithC(t *testing.T, originPath, replicaPath string, protocol int) {
 	if waitErr != nil {
 		t.Fatalf("C replica: %v\nreplica stderr:\n%s", waitErr, replicaStderr.String())
 	}
+	return sc.replica
 }
 
 // copyFile copies src to dst with 0o644 permissions.
@@ -376,9 +410,12 @@ func copyFile(t *testing.T, src, dst string) {
 	}
 }
 
-// rewriteRows adds 1000 to every row of a database's t table — the
-// way the scenarios make a replica differ from its origin.
-func rewriteRows(t *testing.T, path string) {
+// alterReplicaTableContents rewrites every row of the replica's t
+// table: UPDATE t SET x = x + 1000 turns every x into x + 1000 (so
+// 1 -> 1001). The replica then differs from the origin in every row,
+// which the scenarios that call it rely on: every page's content
+// differs, so pages cross the wire.
+func alterReplicaTableContents(t *testing.T, path string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -394,7 +431,7 @@ func rewriteRows(t *testing.T, path string) {
 	}
 }
 
-// minRowsForMaxAggHash is the minimum row count that puts the replica
+// minRowsForMaxAgghash is the minimum row count that puts the replica
 // in the top agghash tier: only past 1001 pages does a replica hash
 // its ranges in 1000-page chunks, so a mismatch hashes at all three
 // sizes — 1000-page chunks, then 30-page chunks, then single pages —
@@ -402,7 +439,7 @@ func rewriteRows(t *testing.T, path string) {
 // detail round. (agghash engages at protocol 2 whenever the replica
 // has more than 100 pages, replica.go L245 — 1100 rows are about 1103
 // pages, past the top tier.)
-const minRowsForMaxAggHash = 1100
+const minRowsForMaxAgghash = 1100
 
 // fixtureBlob is the fixed blob of every fixture row: always the same
 // bytes, in every row, of both files. Its size is what aligns the
@@ -479,72 +516,92 @@ func createFixtureDB(t *testing.T, path string, n int) {
 	}
 }
 
-// buildReplicaIsTheSame builds an origin and a byte-identical replica:
-// nothing differs, no page crosses the wire.
-func buildReplicaIsTheSame(t *testing.T, dir string) (string, string) {
+// scenario is one differential input: a name, an optional forced
+// protocol version (0 = the latest, like Options.Protocol), and the
+// fixture paths of the origin and replica files the syncs run on.
+// The new* constructors build the fixture files in a fresh
+// directory: the origin file first, then the replica file, which may
+// copy or rewrite the origin.
+type scenario struct {
+	name     string
+	protocol int
+	origin   string
+	replica  string
+}
+
+// newReplicaIsTheSame builds the scenario where nothing differs: the
+// replica is a byte-identical copy of the origin, so no page crosses
+// the wire.
+func newReplicaIsTheSame(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 50)
 	replicaPath := filepath.Join(dir, "replica.db")
 	copyFile(t, originPath, replicaPath)
-	return originPath, replicaPath
+	return &scenario{name: "replica-is-the-same", origin: originPath, replica: replicaPath}
 }
 
-// buildReplicaIsDifferent builds an origin and a replica with every row
-// rewritten: every page's content differs, so pages cross the wire.
-func buildReplicaIsDifferent(t *testing.T, dir string) (string, string) {
+// newReplicaIsDifferent builds the scenario where every row of the
+// replica is rewritten: every page's content differs, so pages cross
+// the wire.
+func newReplicaIsDifferent(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 5000)
+	createFixtureDB(t, originPath, 50)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 5000)
-	rewriteRows(t, replicaPath)
-	return originPath, replicaPath
+	createFixtureDB(t, replicaPath, 50)
+	alterReplicaTableContents(t, replicaPath)
+	return &scenario{name: "replica-is-different", origin: originPath, replica: replicaPath}
 }
 
-// buildReplicaIsSmaller builds an origin bigger than the replica: the pages
-// the replica never hashed are treated as missing and the replica
-// grows to match.
-func buildReplicaIsSmaller(t *testing.T, dir string) (string, string) {
+// newReplicaIsSmaller builds the scenario where the origin is bigger
+// than the replica: the pages the replica never hashed are treated as
+// missing and the replica grows to match. The origin is a 5000-row
+// file — about 5010 pages, ~20 MB.
+func newReplicaIsSmaller(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 5000)
+	createFixtureDB(t, originPath, 5000)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 50)
-	return originPath, replicaPath
+	createFixtureDB(t, replicaPath, 50)
+	return &scenario{name: "replica-is-smaller", origin: originPath, replica: replicaPath}
 }
 
-// buildReplicaIsLarger builds an origin smaller than the replica: the
-// ORIGIN_TXN null-insert truncates the replica to the origin's page
-// count.
-func buildReplicaIsLarger(t *testing.T, dir string) (string, string) {
+// newReplicaIsLarger builds the scenario where the origin is smaller
+// than the replica: the ORIGIN_TXN null-insert truncates the replica
+// to the origin's page count. The replica is 95 rows (about 97 pages)
+// — larger than the origin's 52 pages, but under the 100-page
+// threshold, so the scenario stays in the flat round like the other
+// byte scenarios.
+func newReplicaIsLarger(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 5000)
-	return originPath, replicaPath
+	createFixtureDB(t, replicaPath, 95)
+	return &scenario{name: "replica-is-larger", origin: originPath, replica: replicaPath}
 }
 
-// buildReplicaIsAbsent builds an origin and no replica file at all: the
-// empty-replica init materializes the header page and every page of
-// the origin crosses the wire.
-func buildReplicaIsAbsent(t *testing.T, dir string) (string, string) {
+// newReplicaIsAbsent builds the scenario with no replica file at all:
+// the empty-replica init materializes the header page and every page
+// of the origin crosses the wire. The origin is a 5000-row file —
+// about 5010 pages, ~20 MB.
+func newReplicaIsAbsent(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 5000)
-	return originPath, filepath.Join(dir, "replica.db")
+	createFixtureDB(t, originPath, 5000)
+	return &scenario{name: "replica-is-absent", origin: originPath, replica: filepath.Join(dir, "replica.db")}
 }
 
-// buildReplicaIsWal builds a rollback-mode origin and a WAL-mode replica
-// with every row rewritten: the page-1 write-version fix must keep
-// the replica in WAL mode.
-func buildReplicaIsWal(t *testing.T, dir string) (string, string) {
+// newReplicaIsWal builds the scenario with a rollback-mode origin and
+// a WAL-mode replica with every row rewritten: the page-1 write-
+// version fix must keep the replica in WAL mode.
+func newReplicaIsWal(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 50)
+	createFixtureDB(t, replicaPath, 50)
 	db, err := sql.Open("sqlite", replicaPath)
 	if err != nil {
 		t.Fatalf("sql.Open(%q): %v", replicaPath, err)
@@ -557,43 +614,43 @@ func buildReplicaIsWal(t *testing.T, dir string) (string, string) {
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	rewriteRows(t, replicaPath)
-	return originPath, replicaPath
+	alterReplicaTableContents(t, replicaPath)
+	return &scenario{name: "replica-is-wal", origin: originPath, replica: replicaPath}
 }
 
-// buildReplicaProtocolIs1 builds an origin and a small rewritten replica:
-// protocol 1 sends one hash per page, so every page of the origin
-// crosses the wire as singles.
-func buildReplicaProtocolIs1(t *testing.T, dir string) (string, string) {
+// newReplicaProtocolIs1 builds the scenario where protocol 1 sends one
+// hash per page: every page of the origin crosses the wire as singles.
+// The origin is a 5000-row file — about 5010 pages, ~20 MB.
+func newReplicaProtocolIs1(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 5000)
+	createFixtureDB(t, originPath, 5000)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 50)
-	rewriteRows(t, replicaPath)
-	return originPath, replicaPath
+	createFixtureDB(t, replicaPath, 50)
+	alterReplicaTableContents(t, replicaPath)
+	return &scenario{name: "replica-protocol-is-1", protocol: 1, origin: originPath, replica: replicaPath}
 }
 
-// buildReplicaSameWithAgghash builds an origin and a byte-identical
-// agghash replica: every agghash matches, no page crosses the
-// wire, and the origin's write side is the 13-byte minimum (7-byte
-// BEGIN + 5-byte TXN + 1-byte END); the replica still answers with
-// its config, hashes and READY.
-func buildReplicaSameWithAgghash(t *testing.T, dir string) (string, string) {
+// newReplicaSameWithAgghash builds the scenario with a byte-identical
+// agghash replica: every agghash matches, no page crosses the wire,
+// and the origin's write side is the 13-byte minimum (7-byte BEGIN +
+// 5-byte TXN + 1-byte END); the replica still answers with its
+// config, hashes and READY.
+func newReplicaSameWithAgghash(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createFixtureDB(t, originPath, minRowsForMaxAggHash)
+	createFixtureDB(t, originPath, minRowsForMaxAgghash)
 	replicaPath := filepath.Join(dir, "replica.db")
 	copyFile(t, originPath, replicaPath)
-	return originPath, replicaPath
+	return &scenario{name: "replica-agghash-same", origin: originPath, replica: replicaPath}
 }
 
-// buildReplicaDifferentWithAgghash builds a minRowsForMaxAggHash-row origin
-// and replica that differ in the first 15 rows: their x is rewritten
-// (x + 1000, so 1 -> 1001) by "UPDATE t SET x = x + 1000 WHERE
-// rowid <= 15". The replica's page 1 (the change counter) and the 15
-// pages holding those rows now differ; every other page is
-// byte-identical.
+// newReplicaDifferentWithAgghash builds the scenario with a
+// minRowsForMaxAgghash-row origin and a replica that differ in the
+// first 15 rows: their x is rewritten (x + 1000, so 1 -> 1001) by
+// "UPDATE t SET x = x + 1000 WHERE rowid <= 15". The replica's page 1
+// (the change counter) and the 15 pages holding those rows now differ;
+// every other page is byte-identical.
 //
 // The number 15 is about how a sync finds the differing pages. The
 // replica does not hash page by page: it hashes its pages in chunks
@@ -604,12 +661,12 @@ func buildReplicaSameWithAgghash(t *testing.T, dir string) (string, string) {
 // the first 30-page chunk after the split — the sync hashes them at
 // all three sizes (1000, 30, 1) before the pages cross the wire. Any
 // small number of rows would do; 15 is one.
-func buildReplicaDifferentWithAgghash(t *testing.T, dir string) (string, string) {
+func newReplicaDifferentWithAgghash(t *testing.T, dir string) *scenario {
 	t.Helper()
 	originPath := filepath.Join(dir, "origin.db")
-	createFixtureDB(t, originPath, minRowsForMaxAggHash)
+	createFixtureDB(t, originPath, minRowsForMaxAgghash)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createFixtureDB(t, replicaPath, minRowsForMaxAggHash)
+	createFixtureDB(t, replicaPath, minRowsForMaxAgghash)
 	// Change the x of the first 15 rows (rowid <= 15): exactly their
 	// leaf pages differ now — the pages of the first hash chunk.
 	db, err := sql.Open("sqlite", replicaPath)
@@ -624,56 +681,99 @@ func buildReplicaDifferentWithAgghash(t *testing.T, dir string) (string, string)
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	return originPath, replicaPath
+	return &scenario{name: "replica-agghash-different", origin: originPath, replica: replicaPath}
 }
 
-// differentialScenario is one scenario of the differential suite: a
-// name, an optional forced protocol version (0 = the latest, like
-// Options.Protocol), a builder that creates the origin and replica
-// files in a fresh directory, and an assertion that checks a synced
-// replica. The three combos of a scenario — C against C, Go origin
-// against C replica, C origin against Go replica — each get their own
-// fresh pair and each run the assertion.
-//
-// grouped marks the scenarios whose replica has more than 100 pages
-// at protocol 2, so the hash round is the v2 grouped round: their
-// wire must contain REPLICA_CONFIG messages, and the flat scenarios'
-// wire must not.
-type differentialScenario struct {
-	name     string
-	protocol int
-	grouped  bool
-	build    func(t *testing.T, dir string) (originPath, replicaPath string)
-	assert   func(t *testing.T, originPath, replicaPath, baselinePath string)
-}
-
-// assertByteSynced checks a byte-comparable sync: the replica must
-// equal the origin and the baseline replica (except the header bytes
-// SQLite rewrites), keep the origin's page size and count, and pass
-// integrity_check.
-func assertByteSynced(t *testing.T, originPath, replicaPath, baselinePath string) {
+// replicaAgghash returns the whole-file agghash of a database file:
+// the agghash of the per-page hashes of every page except page 1. The
+// sync rewrites page 1's change counter and version bytes on commit,
+// and the C binary and modernc embed different version numbers there,
+// so page 1 is the machinery page — the content comparison starts at
+// page 2. A page-size or page-count mismatch changes the page layout
+// and therefore the hash, so this one value covers content, size and
+// count at once.
+func replicaAgghash(t *testing.T, path string) []byte {
 	t.Helper()
-	assertSynced(t, originPath, replicaPath)
-	assertSynced(t, baselinePath, replicaPath)
-	assertIntegrity(t, replicaPath)
-	wantSize, wantPages := dbInfo(t, originPath)
-	gotSize, gotPages := dbInfo(t, replicaPath)
-	if gotSize != wantSize || gotPages != wantPages {
-		t.Fatalf("replica page size/count = %d/%d, want %d/%d", gotSize, gotPages, wantSize, wantPages)
+	err := hash.Register()
+	if err != nil {
+		t.Fatalf("hash.Register: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open(%q): %v", path, err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+	var sum []byte
+	err = db.QueryRow("SELECT agghash(hash(data)) FROM sqlite_dbpage('main') WHERE pgno > 1 ORDER BY pgno").Scan(&sum)
+	if err != nil {
+		t.Fatalf("agghash(%q): %v", path, err)
+	}
+	return sum
+}
+
+// assertSucceeded fails the test unless the run's Go role returned no
+// error; the C process's stderr is included in the failure message.
+func (r result) assertSucceeded() {
+	r.t.Helper()
+	if r.goErr != nil {
+		r.t.Fatalf("scenario %s: %v\nC stderr:\n%s", r.scenario.name, r.goErr, r.stderr)
 	}
 }
 
-// assertWalSynced asserts a WAL-mode sync result through SQL: the
-// replica is still in WAL mode (the page-1 write-version fix), holds
-// the origin's rows, and passes
-// integrity_check. The main file is not byte-comparable — the sync's
-// writes landed in the -wal file — so the baseline replica plays no
-// part here.
-func assertWalSynced(t *testing.T, originPath, replicaPath, baselinePath string) {
-	t.Helper()
-	db, err := sql.Open("sqlite", replicaPath)
+// assertReplicaAgghashSame fails the test unless the replica's
+// whole-file agghash equals the origin's: the sync's content result.
+func (r result) assertReplicaAgghashSame() {
+	r.t.Helper()
+	got := replicaAgghash(r.t, r.scenario.replica)
+	want := replicaAgghash(r.t, r.scenario.origin)
+	if !bytes.Equal(got, want) {
+		r.t.Fatalf("replica agghash %x, origin agghash %x", got, want)
+	}
+}
+
+// assertReplicaAgghashSameAs fails the test unless the replica's
+// whole-file agghash equals the given reference replica's: the Go run
+// must produce the same content the C binary produces on the same
+// fixture.
+func (r result) assertReplicaAgghashSameAs(referenceReplicaPath string) {
+	r.t.Helper()
+	got := replicaAgghash(r.t, r.scenario.replica)
+	want := replicaAgghash(r.t, referenceReplicaPath)
+	if !bytes.Equal(got, want) {
+		r.t.Fatalf("replica agghash %x, reference agghash %x", got, want)
+	}
+}
+
+// assertIntegrity fails the test unless the replica passes
+// PRAGMA integrity_check.
+func (r result) assertIntegrity() {
+	r.t.Helper()
+	db, err := sql.Open("sqlite", r.scenario.replica)
 	if err != nil {
-		t.Fatalf("sql.Open(%q): %v", replicaPath, err)
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.replica, err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+	var result string
+	err = db.QueryRow("PRAGMA integrity_check").Scan(&result)
+	if err != nil {
+		r.t.Fatalf("integrity_check: %v", err)
+	}
+	if result != "ok" {
+		r.t.Fatalf("integrity_check = %q, want ok", result)
+	}
+}
+
+// assertWalMode fails the test unless the replica is still in WAL
+// mode: the sync must preserve the replica's journal mode.
+func (r result) assertWalMode() {
+	r.t.Helper()
+	db, err := sql.Open("sqlite", r.scenario.replica)
+	if err != nil {
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.replica, err)
 	}
 	defer func() {
 		_ = db.Close()
@@ -681,112 +781,211 @@ func assertWalSynced(t *testing.T, originPath, replicaPath, baselinePath string)
 	var mode string
 	err = db.QueryRow("PRAGMA journal_mode").Scan(&mode)
 	if err != nil {
-		t.Fatalf("journal_mode: %v", err)
+		r.t.Fatalf("journal_mode: %v", err)
 	}
 	if mode != "wal" {
-		t.Fatalf("journal_mode = %q, want wal", mode)
-	}
-	var page1 []byte
-	err = db.QueryRow("SELECT data FROM sqlite_dbpage('main') WHERE pgno=1").Scan(&page1)
-	if err != nil {
-		t.Fatalf("dbpage: %v", err)
-	}
-	if page1[18] != 2 || page1[19] != 2 {
-		t.Fatalf("replica page 1 versions = %d,%d, want 2,2 (WAL kept)", page1[18], page1[19])
-	}
-	var result string
-	err = db.QueryRow("PRAGMA integrity_check").Scan(&result)
-	if err != nil {
-		t.Fatalf("integrity_check: %v", err)
-	}
-	if result != "ok" {
-		t.Fatalf("integrity_check = %q, want ok", result)
-	}
-	want := xColumn(t, originPath)
-	got := xColumn(t, replicaPath)
-	if !slices.Equal(got, want) {
-		t.Fatalf("replica rows = %v, want %v", got, want)
+		r.t.Fatalf("journal_mode = %q, want wal", mode)
 	}
 }
 
+// assertPage1VersionsWal fails the test unless the replica's page 1
+// carries the WAL write versions 2,2 (bytes 18-19): the page-1
+// write-version fix that keeps the replica in WAL mode.
+func (r result) assertPage1VersionsWal() {
+	r.t.Helper()
+	db, err := sql.Open("sqlite", r.scenario.replica)
+	if err != nil {
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.replica, err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+	var page1 []byte
+	err = db.QueryRow("SELECT data FROM sqlite_dbpage('main') WHERE pgno=1").Scan(&page1)
+	if err != nil {
+		r.t.Fatalf("dbpage: %v", err)
+	}
+	if page1[18] != 2 || page1[19] != 2 {
+		r.t.Fatalf("replica page 1 versions = %d,%d, want 2,2 (WAL kept)", page1[18], page1[19])
+	}
+}
+
+// assertRowsSame fails the test unless the replica holds the origin's
+// rows. The content check for WAL-mode replicas, whose writes land in
+// the -wal file and whose main file is not comparable.
+func (r result) assertRowsSame() {
+	r.t.Helper()
+	got := xColumn(r.t, r.scenario.replica)
+	want := xColumn(r.t, r.scenario.origin)
+	if !slices.Equal(got, want) {
+		r.t.Fatalf("replica rows = %v, want %v", got, want)
+	}
+}
+
+// assertTrafficSameAs fails the test unless the two Go runs moved
+// exactly the bytes the C binary moves on the same fixture. The two
+// results are different runs — syncGoToC (the Go origin) and
+// syncCToGo (the Go replica) — on identical fixtures, and each pipe
+// measures the peer as well as the Go role: a Go role's reads are
+// exactly its C peer's writes, so C's traffic is inferred from the Go
+// counters, never measured directly. Hence this run's writes — the Go
+// origin's traffic — must equal the other run's reads — the C
+// origin's traffic — and this run's reads — the C replica's traffic —
+// must equal the other run's writes — the Go replica's traffic. Any
+// divergence — a resend of pages C would not send, a hash C would
+// not send — breaks the equality.
+func (r result) assertTrafficSameAs(other result) {
+	r.t.Helper()
+	if r.traffic.writes != other.traffic.reads {
+		r.t.Fatalf("Go origin wrote %d bytes, C origin wrote %d", r.traffic.writes, other.traffic.reads)
+	}
+	if r.traffic.reads != other.traffic.writes {
+		r.t.Fatalf("Go replica wrote %d bytes, C replica wrote %d", other.traffic.writes, r.traffic.reads)
+	}
+}
+
+// assertAgghashRoundRan fails the test unless the Go replica's wire
+// carried REPLICA_CONFIG messages — the grouped round's signature on
+// the replica side. Only the agghash scenarios call it, and only on
+// the Go-replica run: REPLICA_CONFIG is the deterministic signal that
+// the grouped round engaged. The origin's side of the round —
+// ORIGIN_DETAIL refinement — is scenario-dependent (absent in
+// replica-agghash-same, where every chunk hash matches) and is pinned
+// by assertTrafficSameAs instead, whose byte-for-byte equality with C
+// proves the same refinement rounds ran. The flat scenarios call the
+// complementary assertAgghashRoundNotRan.
+func (r result) assertAgghashRoundRan() {
+	r.t.Helper()
+	if r.traffic.agghashMessages == 0 {
+		r.t.Fatalf("Go replica sent no REPLICA_CONFIG/ORIGIN_DETAIL: the agghash round did not run")
+	}
+}
+
+// assertAgghashRoundNotRan fails the test unless the Go replica's wire
+// carried no REPLICA_CONFIG or ORIGIN_DETAIL messages — the signature
+// of the grouped agghash round. Every flat scenario calls it: their
+// replicas stay under the 100-page threshold, so the hash round is the
+// flat page-by-page round and any grouped message is a regression.
+// (A spurious grouped round would also break assertTrafficSameAs — it
+// inflates only the one combo that runs it — but this pins the
+// flatness directly, with a message that says which round ran.)
+func (r result) assertAgghashRoundNotRan() {
+	r.t.Helper()
+	if r.traffic.agghashMessages > 0 {
+		r.t.Fatalf("Go replica sent %d REPLICA_CONFIG/ORIGIN_DETAIL messages, want none (flat round)", r.traffic.agghashMessages)
+	}
+}
+
+// byteScenarios are the content scenarios: fixtures whose files are
+// byte-comparable, so the whole-file agghash checks apply. Their
+// replicas stay under the 100-page threshold, so the hash round is
+// the flat page-by-page round — the group asserts that no grouped
+// message crossed the wire. newReplicaProtocolIs1 is folded in here:
+// it shares this exact body, and its forced protocol 1 takes the flat
+// round through the protocol < 2 branch of the gate (replica.go L245)
+// rather than through the page count.
+var byteScenarios = []func(t *testing.T, dir string) *scenario{
+	newReplicaIsTheSame,
+	newReplicaIsDifferent,
+	newReplicaIsSmaller,
+	newReplicaIsLarger,
+	newReplicaIsAbsent,
+	newReplicaProtocolIs1,
+}
+
+// agghashScenarios are the grouped-round scenarios — the only ones:
+// their fixtures have more than 100 pages, so the replica hashes its
+// ranges in chunks and the wire must carry REPLICA_CONFIG messages.
+// The byte scenarios' replicas stay at 100 pages or fewer, so none of
+// them engage the grouped round.
+var agghashScenarios = []func(t *testing.T, dir string) *scenario{
+	newReplicaSameWithAgghash,
+	newReplicaDifferentWithAgghash,
+}
+
 // TestDifferential is the hard fidelity gate of the port: every
-// scenario runs in three combinations — the C binary against itself
-// (the baseline), the Go origin against the C replica, and the C
-// origin against the Go replica — and each Go-produced replica must
-// match the origin and the baseline replica byte-for-byte (masked to
-// the header fields SQLite rewrites on commit). The only way the Go
-// roles can produce an identical replica is by speaking the same
-// protocol and hashing the same way, so this proves wire interop and
-// hash equivalence at once. The agghash scenarios (replica-agghash-
-// same, replica-agghash-different) exercise the agghash round
-// against the binary — chunked agghash values, REPLICA_CONFIG
-// renegotiation and the ORIGIN_DETAIL refinement, down to the second
-// detail round — the Go replica's wire must show REPLICA_CONFIG
-// messages there and nowhere else — and the two Go combos of every
-// scenario must move exactly the bytes the C binary moves on the same
-// fixture, so a regression that resends pages instead of trusting a
-// matching hash fails the suite. The reference binary is a hard
-// requirement (see checkReferenceBinary); scenarios run sequentially.
+// scenario runs three syncs — the C binary against itself (the
+// reference replica), the Go origin against the C replica, and the C
+// origin against the Go replica — and each Go result must hold the
+// origin's content, match the reference replica, and move exactly the
+// bytes the C binary moves on the same fixture. Content is the
+// whole-file agghash for the byte-comparable scenarios; the WAL
+// scenario checks its rows instead (its writes land in the -wal file)
+// and discards the reference replica. The only way the Go roles can
+// satisfy that is by speaking the same protocol and hashing the same
+// way, so this proves wire interop and hash equivalence at once. The
+// wire also proves which round ran: the flat scenarios must show no
+// REPLICA_CONFIG/ORIGIN_DETAIL (their replicas stay under the 100-page
+// threshold), and the agghash scenarios must show it — a regression
+// that engages the grouped round where the original suite did not
+// fails the suite. The reference binary is a hard requirement (see
+// checkReferenceBinary); the groups run sequentially.
 func TestDifferential(t *testing.T) {
 	checkReferenceBinary(t)
-	scenarios := []differentialScenario{
-		{name: "replica-is-the-same", build: buildReplicaIsTheSame, assert: assertByteSynced},
-		{name: "replica-is-different", build: buildReplicaIsDifferent, assert: assertByteSynced},
-		{name: "replica-is-smaller", build: buildReplicaIsSmaller, assert: assertByteSynced},
-		{name: "replica-is-larger", build: buildReplicaIsLarger, assert: assertByteSynced},
-		{name: "replica-is-absent", build: buildReplicaIsAbsent, assert: assertByteSynced},
-		{name: "replica-is-wal", build: buildReplicaIsWal, assert: assertWalSynced},
-		{name: "replica-protocol-is-1", protocol: 1, build: buildReplicaProtocolIs1, assert: assertByteSynced},
-		{name: "replica-agghash-same", grouped: true, build: buildReplicaSameWithAgghash, assert: assertByteSynced},
-		{name: "replica-agghash-different", grouped: true, build: buildReplicaDifferentWithAgghash, assert: assertByteSynced},
-	}
-	for _, sc := range scenarios {
-		t.Run(sc.name, func(t *testing.T) {
-			// Combo 1: C syncs C. The replica it produces becomes the
-			// baseline that the two Go combos below must match
-			// byte-for-byte.
-			originPath, replicaPath := sc.build(t, t.TempDir())
-			syncCWithC(t, originPath, replicaPath, sc.protocol)
-			sc.assert(t, originPath, replicaPath, replicaPath)
-			baselinePath := replicaPath
 
-			// Go origin against the C replica.
-			originPath, replicaPath = sc.build(t, t.TempDir())
-			goOriginCounters := syncGoWithC(t, originRole, originPath, replicaPath, sc.protocol)
-			goOriginWrites, goOriginReads := goOriginCounters.writes, goOriginCounters.reads
-			sc.assert(t, originPath, replicaPath, baselinePath)
+	t.Run("byte", func(t *testing.T) {
+		for _, newScenario := range byteScenarios {
+			referenceReplicaPath := syncCToC(t, newScenario(t, t.TempDir()))
 
-			// C origin against the Go replica.
-			originPath, replicaPath = sc.build(t, t.TempDir())
-			goReplicaCounters := syncGoWithC(t, replicaRole, originPath, replicaPath, sc.protocol)
-			goReplicaWrites, goReplicaReads, goReplicaAgghashMessages := goReplicaCounters.writes, goReplicaCounters.reads, goReplicaCounters.agghashMessages
-			sc.assert(t, originPath, replicaPath, baselinePath)
+			goOriginResult := syncGoToC(t, newScenario(t, t.TempDir()))
+			goOriginResult.assertSucceeded()
+			goOriginResult.assertReplicaAgghashSame()
+			goOriginResult.assertReplicaAgghashSameAs(referenceReplicaPath)
+			goOriginResult.assertIntegrity()
 
-			// The Go roles must move exactly the bytes the C binary moves
-			// on the same fixture. goOriginWrites is the Go origin's side
-			// of the conversation; goReplicaReads is what the Go replica
-			// read from the C origin in the other combo — the C origin's
-			// own traffic on an identical fixture. Likewise, goOriginReads
-			// is the C replica's traffic and goReplicaWrites the Go
-			// replica's. Any divergence — a resend of pages C would not
-			// send, a hash C would not send — breaks the equality.
-			if goOriginWrites != goReplicaReads {
-				t.Fatalf("Go origin wrote %d bytes, C origin wrote %d", goOriginWrites, goReplicaReads)
-			}
-			if goOriginReads != goReplicaWrites {
-				t.Fatalf("Go replica wrote %d bytes, C replica wrote %d", goReplicaWrites, goOriginReads)
-			}
+			goReplicaResult := syncCToGo(t, newScenario(t, t.TempDir()))
+			goReplicaResult.assertSucceeded()
+			goReplicaResult.assertReplicaAgghashSame()
+			goReplicaResult.assertReplicaAgghashSameAs(referenceReplicaPath)
+			goReplicaResult.assertIntegrity()
+			goReplicaResult.assertAgghashRoundNotRan()
 
-			// The Go replica must have used the v2 grouped round exactly
-			// when the scenario is grouped: a REPLICA_CONFIG message
-			// (counted by pipeConn.agghashMessages) is sent only when the
-			// replica hashes its pages in chunks.
-			if sc.grouped && goReplicaAgghashMessages == 0 {
-				t.Fatalf("Go replica sent no REPLICA_CONFIG: the v2 grouped round did not run")
-			}
-			if !sc.grouped && goReplicaAgghashMessages > 0 {
-				t.Fatalf("Go replica sent %d REPLICA_CONFIG messages, want none (flat mode)", goReplicaAgghashMessages)
-			}
-		})
-	}
+			goOriginResult.assertTrafficSameAs(goReplicaResult)
+		}
+	})
+
+	t.Run("wal", func(t *testing.T) {
+		// The reference run validates the WAL fixture under the C
+		// binary; its replica path is not compared (WAL content lives
+		// in the -wal file), so the result is discarded.
+		_ = syncCToC(t, newReplicaIsWal(t, t.TempDir()))
+
+		goOriginResult := syncGoToC(t, newReplicaIsWal(t, t.TempDir()))
+		goOriginResult.assertSucceeded()
+		goOriginResult.assertWalMode()
+		goOriginResult.assertPage1VersionsWal()
+		goOriginResult.assertRowsSame()
+		goOriginResult.assertIntegrity()
+
+		goReplicaResult := syncCToGo(t, newReplicaIsWal(t, t.TempDir()))
+		goReplicaResult.assertSucceeded()
+		goReplicaResult.assertWalMode()
+		goReplicaResult.assertPage1VersionsWal()
+		goReplicaResult.assertRowsSame()
+		goReplicaResult.assertIntegrity()
+		goReplicaResult.assertAgghashRoundNotRan()
+
+		goOriginResult.assertTrafficSameAs(goReplicaResult)
+	})
+
+	t.Run("agghash", func(t *testing.T) {
+		for _, newScenario := range agghashScenarios {
+			referenceReplicaPath := syncCToC(t, newScenario(t, t.TempDir()))
+
+			goOriginResult := syncGoToC(t, newScenario(t, t.TempDir()))
+			goOriginResult.assertSucceeded()
+			goOriginResult.assertReplicaAgghashSame()
+			goOriginResult.assertReplicaAgghashSameAs(referenceReplicaPath)
+			goOriginResult.assertIntegrity()
+
+			goReplicaResult := syncCToGo(t, newScenario(t, t.TempDir()))
+			goReplicaResult.assertSucceeded()
+			goReplicaResult.assertReplicaAgghashSame()
+			goReplicaResult.assertReplicaAgghashSameAs(referenceReplicaPath)
+			goReplicaResult.assertIntegrity()
+			goReplicaResult.assertAgghashRoundRan()
+
+			goOriginResult.assertTrafficSameAs(goReplicaResult)
+		}
+	})
 }
