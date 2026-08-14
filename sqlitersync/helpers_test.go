@@ -1,5 +1,5 @@
 // helpers_test.go holds the helpers shared by the test files: the
-// fixture readers (dbInfo, readPages), the fixture builders
+// fixture readers (dbPageInfo, readPages), the fixture builders
 // (createFixtureDB and the new* scenario constructors), the sync-run
 // result and its assert methods, and the sync-result assertions
 // shared by the suites.
@@ -17,9 +17,9 @@ import (
 	"github.com/caasmo/go-sqlite-rsync/wire"
 )
 
-// dbInfo opens a database file and returns its page size and page
+// dbPageInfo opens a database file and returns its page size and page
 // count.
-func dbInfo(t *testing.T, path string) (pageSize int, pageCount uint32) {
+func dbPageInfo(t *testing.T, path string) (pageSize int, pageCount uint32) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

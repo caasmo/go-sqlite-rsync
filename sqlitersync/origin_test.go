@@ -22,7 +22,7 @@ func TestOriginFullCopy(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 100)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedReplica(t, s)
@@ -76,7 +76,7 @@ func TestOriginNoChange(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 100)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedReplica(t, s)
@@ -112,7 +112,7 @@ func TestOriginDetailRound(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 5)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	if pageCount < 3 {
 		t.Fatalf("test needs at least 3 pages, origin has %d", pageCount)
 	}
@@ -173,7 +173,7 @@ func TestOriginGrowth(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 5)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	if pageCount < 3 {
 		t.Fatalf("test needs at least 3 pages, origin has %d", pageCount)
 	}
@@ -218,7 +218,7 @@ func TestOriginDowngrade(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 100)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedReplica(t, s)

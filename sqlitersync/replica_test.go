@@ -23,7 +23,7 @@ func TestReplicaFullCopy(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 100)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 
 	replicaPath := filepath.Join(dir, "replica.db")
 	s := &rsync{replicaPath: replicaPath, protocol: wire.ProtocolVersion}
@@ -83,7 +83,7 @@ func TestReplicaIdentical(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 95)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	// Byte-identical replica: copy the origin file.
 	orig, err := os.ReadFile(originPath)
@@ -127,7 +127,7 @@ func TestReplicaTruncate(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 10) // small origin
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	createFixtureDB(t, replicaPath, 95) // bigger replica
 
@@ -144,7 +144,7 @@ func TestReplicaTruncate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replicaSide: %v", err)
 	}
-	_, got := dbInfo(t, replicaPath)
+	_, got := dbPageInfo(t, replicaPath)
 	if got != pageCount {
 		t.Fatalf("replica has %d pages, want %d", got, pageCount)
 	}
@@ -162,11 +162,11 @@ func TestReplicaLargeReplicaSubdivides(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 100)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	// Enough rows to exceed 100 pages at the default page size.
 	createFixtureDB(t, replicaPath, 150)
-	_, nRPage := dbInfo(t, replicaPath)
+	_, nRPage := dbPageInfo(t, replicaPath)
 	if nRPage <= 100 {
 		t.Fatalf("test needs a replica with more than 100 pages, replica has %d", nRPage)
 	}
@@ -204,7 +204,7 @@ func TestReplicaWalFix(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 50)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 
 	replicaPath := filepath.Join(dir, "replica.db")
 	db, err := sql.Open("sqlite", replicaPath)
@@ -283,7 +283,7 @@ func TestReplicaDowngrade(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 100)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	createFixtureDB(t, replicaPath, 100)
 
@@ -312,7 +312,7 @@ func TestReplicaPageSizeMismatch(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 50)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	// A 512-byte-page replica.
 	db, err := sql.Open("sqlite", replicaPath)
@@ -352,7 +352,7 @@ func TestReplicaWalOnly(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 50)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	createFixtureDB(t, replicaPath, 50) // rollback mode
 
@@ -415,7 +415,7 @@ func TestReplicaWrongEncoding(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 50)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	db, err := sql.Open("sqlite", replicaPath)
 	if err != nil {
@@ -474,7 +474,7 @@ func TestReplicaOriginMsg(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
 	createFixtureDB(t, originPath, 50)
-	pageSize, pageCount := dbInfo(t, originPath)
+	pageSize, pageCount := dbPageInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	createFixtureDB(t, replicaPath, 50)
 
