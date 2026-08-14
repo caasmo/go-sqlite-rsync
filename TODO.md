@@ -94,3 +94,12 @@ The C program's `-v` option prints a summary when a sync ends: bytes sent and re
 - `impl-port-step7-differential.md` — the plan that introduced the scenario/assert design
 - `impl-testdifferential-groupedhash.md` — the follow-up plan that extended `differentialScenario` instead of redesigning it
 
+# sqlitersync: we should probably ditch the binary brittle comparison
+
+The differential assertions compare replicas byte-for-byte with a header mask (`assertSynced` ignores page-1 bytes 24-27 and 92-99 — the change counter and version fields C and modernc write differently). That is machinery bullshit: the project's own hash is the real tool — assert whole-file agghash equality instead (agghash of all pages of the replica == agghash of all pages of the origin), which proves content equality without masking exceptions.
+
+- `sqlitersync/helpers_test.go` — `assertSynced`, the masked byte comparison to be ditched
+- `sqlitersync/differential_test.go` — `assertByteSynced` (L454) uses the mask; `dbInfo` page size/count checks also fall under the hash
+- `hash/sql.go` — `agghash`, the existing whole-file hash tool; `sqlite_dbpage` iterates pages
+- `brainstorm-*` redesign discussion: assertions on whole-file agghash replace the masked binary comparison
+
