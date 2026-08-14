@@ -22,7 +22,7 @@ import (
 func TestReplicaFullCopy(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 100)
 	pageSize, pageCount := dbInfo(t, originPath)
 
 	replicaPath := filepath.Join(dir, "replica.db")
@@ -82,7 +82,7 @@ func TestReplicaFullCopy(t *testing.T) {
 func TestReplicaIdentical(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 95)
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	// Byte-identical replica: copy the origin file.
@@ -126,10 +126,10 @@ func TestReplicaIdentical(t *testing.T) {
 func TestReplicaTruncate(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 10) // small origin
+	createFixtureDB(t, originPath, 10) // small origin
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 1000) // bigger replica
+	createFixtureDB(t, replicaPath, 95) // bigger replica
 
 	s := &rsync{replicaPath: replicaPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedOrigin(t, s)
@@ -161,11 +161,11 @@ func TestReplicaTruncate(t *testing.T) {
 func TestReplicaLargeReplicaSubdivides(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 100)
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	// Enough rows to exceed 100 pages at the default page size.
-	createDB(t, replicaPath, 70000)
+	createFixtureDB(t, replicaPath, 150)
 	_, nRPage := dbInfo(t, replicaPath)
 	if nRPage <= 100 {
 		t.Fatalf("test needs a replica with more than 100 pages, replica has %d", nRPage)
@@ -203,7 +203,7 @@ func TestReplicaLargeReplicaSubdivides(t *testing.T) {
 func TestReplicaWalFix(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 	pageSize, pageCount := dbInfo(t, originPath)
 
 	replicaPath := filepath.Join(dir, "replica.db")
@@ -232,7 +232,14 @@ func TestReplicaWalFix(t *testing.T) {
 	if originPages[0][18] != 1 {
 		t.Fatalf("origin page 1 write version = %d, want 1 (rollback)", originPages[0][18])
 	}
-	o.page(1, originPages[0])
+	// Send every origin page, as the real origin would: the replica's
+	// own pages mismatch (badHash) and the rest fall in the gap fill.
+	// The replica's file is then built entirely by these sends, so the
+	// ORIGIN_TXN truncation below has nothing to grow — the file ends
+	// at the origin's page count whatever the replica held before.
+	for i, page := range originPages {
+		o.page(uint32(i)+1, page)
+	}
 	o.txn(pageCount)
 	o.end()
 
@@ -275,10 +282,10 @@ func TestReplicaWalFix(t *testing.T) {
 func TestReplicaDowngrade(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 100)
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 100)
+	createFixtureDB(t, replicaPath, 100)
 
 	s := &rsync{replicaPath: replicaPath, protocol: 1} // replica speaks protocol 1
 	o, done := newScriptedOrigin(t, s)
@@ -304,7 +311,7 @@ func TestReplicaDowngrade(t *testing.T) {
 func TestReplicaPageSizeMismatch(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	// A 512-byte-page replica.
@@ -344,10 +351,10 @@ func TestReplicaPageSizeMismatch(t *testing.T) {
 func TestReplicaWalOnly(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 50) // rollback mode
+	createFixtureDB(t, replicaPath, 50) // rollback mode
 
 	s := &rsync{replicaPath: replicaPath, protocol: wire.ProtocolVersion, walOnly: true}
 	o, done := newScriptedOrigin(t, s)
@@ -407,7 +414,7 @@ func TestReplicaCommCheck(t *testing.T) {
 func TestReplicaWrongEncoding(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
 	db, err := sql.Open("sqlite", replicaPath)
@@ -466,10 +473,10 @@ func TestReplicaOriginError(t *testing.T) {
 func TestReplicaOriginMsg(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 	pageSize, pageCount := dbInfo(t, originPath)
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 50)
+	createFixtureDB(t, replicaPath, 50)
 
 	s := &rsync{replicaPath: replicaPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedOrigin(t, s)

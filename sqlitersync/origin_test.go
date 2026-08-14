@@ -21,7 +21,7 @@ import (
 func TestOriginFullCopy(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 100)
 	pageSize, pageCount := dbInfo(t, originPath)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
@@ -75,7 +75,7 @@ func TestOriginFullCopy(t *testing.T) {
 func TestOriginNoChange(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 100)
 	pageSize, pageCount := dbInfo(t, originPath)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
@@ -111,7 +111,7 @@ func TestOriginNoChange(t *testing.T) {
 func TestOriginDetailRound(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 5000)
+	createFixtureDB(t, originPath, 5)
 	pageSize, pageCount := dbInfo(t, originPath)
 	if pageCount < 3 {
 		t.Fatalf("test needs at least 3 pages, origin has %d", pageCount)
@@ -172,7 +172,7 @@ func TestOriginDetailRound(t *testing.T) {
 func TestOriginGrowth(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 5000)
+	createFixtureDB(t, originPath, 5)
 	pageSize, pageCount := dbInfo(t, originPath)
 	if pageCount < 3 {
 		t.Fatalf("test needs at least 3 pages, origin has %d", pageCount)
@@ -217,7 +217,7 @@ func TestOriginGrowth(t *testing.T) {
 func TestOriginDowngrade(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 100)
+	createFixtureDB(t, originPath, 100)
 	pageSize, pageCount := dbInfo(t, originPath)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
@@ -263,7 +263,7 @@ func TestOriginDowngrade(t *testing.T) {
 func TestOriginWalOnly(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50) // rollback mode
+	createFixtureDB(t, originPath, 50) // rollback mode
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion, walOnly: true}
 	o, done := newScriptedReplica(t, s)
@@ -325,7 +325,7 @@ func TestOriginCommCheck(t *testing.T) {
 func TestOriginReplicaError(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedReplica(t, s)
@@ -346,7 +346,7 @@ func TestOriginReplicaError(t *testing.T) {
 func TestOriginReplicaMsg(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedReplica(t, s)
@@ -370,7 +370,7 @@ func TestOriginReplicaMsg(t *testing.T) {
 func TestOriginEOF(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedReplica(t, s)
@@ -390,7 +390,7 @@ func TestOriginEOF(t *testing.T) {
 func TestOriginUnknownMessage(t *testing.T) {
 	dir := t.TempDir()
 	originPath := filepath.Join(dir, "origin.db")
-	createDB(t, originPath, 50)
+	createFixtureDB(t, originPath, 50)
 
 	s := &rsync{originPath: originPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedReplica(t, s)

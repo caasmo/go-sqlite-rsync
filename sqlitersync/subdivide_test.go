@@ -58,7 +58,7 @@ func TestSubdivideHashRange(t *testing.T) {
 func TestSendHashMessages(t *testing.T) {
 	dir := t.TempDir()
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 50)
+	createFixtureDB(t, replicaPath, 25)
 	s := openTestReplica(t, replicaPath)
 	nRPage := pageCount(t, s)
 	if nRPage < 2 {
@@ -134,7 +134,7 @@ func TestSendHashMessages(t *testing.T) {
 func TestSendHashMessagesConfig(t *testing.T) {
 	dir := t.TempDir()
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 5000)
+	createFixtureDB(t, replicaPath, 10)
 	s := openTestReplica(t, replicaPath)
 	nRPage := pageCount(t, s)
 	if nRPage < 7 {
@@ -235,7 +235,7 @@ func TestSendHashMessagesConfig(t *testing.T) {
 func TestSendHashMessagesMissingPages(t *testing.T) {
 	dir := t.TempDir()
 	replicaPath := filepath.Join(dir, "replica.db")
-	createDB(t, replicaPath, 50)
+	createFixtureDB(t, replicaPath, 50)
 	s := openTestReplica(t, replicaPath)
 	_, err := s.db.Exec("INSERT INTO sendHash VALUES(999,1)")
 	if err != nil {

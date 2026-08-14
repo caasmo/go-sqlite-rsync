@@ -1,71 +1,21 @@
-// helpers_test.go holds the helpers shared by several test files: the
-// database fixtures (createDB, dbInfo, readPages) and the sync-result
-// assertions (assertSynced, assertIntegrity, xColumn).
+// helpers_test.go holds the helpers shared by the test files: the
+// fixture readers (dbInfo, readPages), the fixture builders
+// (createFixtureDB and the new* scenario constructors), the sync-run
+// result and its assert methods, and the sync-result assertions
+// shared by the suites.
 package sqlitersync
 
 import (
+	"bytes"
 	"database/sql"
+	"io"
 	"os"
+	"path/filepath"
 	"testing"
-)
 
-// createDB creates a SQLite database file with one table holding n
-// rows. The table is t(x): one column named x, filled with the numbers
-// 0, 1, 2, ..., n-1.
-//
-// The tests need pairs of databases that are identical in shape but
-// can differ in content, so n is the only knob: a small n makes a
-// small file (50 or 100 rows fit on a single page), a large n makes a
-// file with many pages (the protocol works per page, and the tests
-// that exercise grouping need hundreds of pages). Tests that want the
-// replica to differ from the origin open the replica file and run
-// UPDATE t SET x = x + 1000 on it.
-//
-// The rows are inserted from Go, in one transaction: a prepared
-// statement is executed once per row, and the transaction is committed
-// at the end. One transaction means one commit, whatever n is — the
-// inserts are atomic (either all n rows land or none do) and the file
-// is synced to disk once. Without the transaction, every row would be
-// its own autocommit insert with its own disk sync.
-func createDB(t *testing.T, path string, n int) {
-	t.Helper()
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open(%q): %v", path, err)
-	}
-	_, err = db.Exec("CREATE TABLE t(x)")
-	if err != nil {
-		t.Fatalf("CREATE TABLE: %v", err)
-	}
-	if n > 0 {
-		tx, err := db.Begin()
-		if err != nil {
-			t.Fatalf("Begin: %v", err)
-		}
-		stmt, err := tx.Prepare("INSERT INTO t(x) VALUES(?)")
-		if err != nil {
-			t.Fatalf("Prepare: %v", err)
-		}
-		for i := 0; i < n; i++ {
-			_, err = stmt.Exec(i)
-			if err != nil {
-				t.Fatalf("INSERT: %v", err)
-			}
-		}
-		err = stmt.Close()
-		if err != nil {
-			t.Fatalf("Close statement: %v", err)
-		}
-		err = tx.Commit()
-		if err != nil {
-			t.Fatalf("Commit: %v", err)
-		}
-	}
-	err = db.Close()
-	if err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-}
+	"github.com/caasmo/go-sqlite-rsync/hash"
+	"github.com/caasmo/go-sqlite-rsync/wire"
+)
 
 // dbInfo opens a database file and returns its page size and page
 // count.
@@ -107,43 +57,354 @@ func readPages(t *testing.T, path string, pageSize int) [][]byte {
 	return pages
 }
 
-// assertSynced compares the replica file with the origin file after a
-// sync: everything must match byte-for-byte, except page 1's header
-// fields SQLite rewrites on commit — the change counter (bytes 24-27)
-// and the version-valid-for field with the SQLite version number
-// (bytes 92-99). The reference C replica differs in exactly those
-// fields (verified against the reference binary), so the same mask
-// applies to the port.
-func assertSynced(t *testing.T, originPath, replicaPath string) {
-	t.Helper()
-	got, err := os.ReadFile(replicaPath)
-	if err != nil {
-		t.Fatalf("ReadFile(%q): %v", replicaPath, err)
-	}
-	want, err := os.ReadFile(originPath)
-	if err != nil {
-		t.Fatalf("ReadFile(%q): %v", originPath, err)
-	}
-	if len(got) != len(want) {
-		t.Fatalf("replica is %d bytes, origin is %d", len(got), len(want))
-	}
-	for i, b := range got {
-		if (i >= 24 && i <= 27) || (i >= 92 && i <= 99) {
-			continue
-		}
-		if b != want[i] {
-			t.Fatalf("replica differs from origin at byte %d: %02x vs %02x", i, b, want[i])
-		}
-	}
-}
+// fixtureBlob is the fixed blob of every fixture row: always the same
+// bytes, in every row, of both files. Its size is what aligns the
+// fixture with the page layout: at 4000 bytes a row's cell is about
+// 4011 bytes, so exactly one row fits per leaf page and the payload
+// stays under the 4061-byte local-payload limit — no overflow pages
+// (the full byte math is in createFixtureDB). Rows differ only in
+// their rowid and, after the different scenario's rewrite, in x —
+// the blob never changes.
+var fixtureBlob = bytes.Repeat([]byte{0x5a}, 4000)
 
-// assertIntegrity runs PRAGMA integrity_check on a database file and
-// fails the test unless the result is "ok".
-func assertIntegrity(t *testing.T, path string) {
+// createFixtureDB creates a database file with one table t(x, b)
+// holding n rows: x is always 1 and b is always fixtureBlob, so
+// every row is byte-identical except for its rowid. The constant row
+// size makes the file's page layout trivially predictable, which the
+// agghash scenarios count on:
+//
+//   - SQLite stores a table-leaf cell's payload in the page itself up
+//     to usableSize-35 = 4061 bytes (4096-byte pages, no reserved
+//     bytes); a larger payload spills into overflow pages. A row's
+//     payload — rowid varint (1-2 bytes) + record header (4 bytes:
+//     sizes, x type, blob type) + x (1 byte) + blob (4000 bytes) — is
+//     about 4007 bytes, safely under the limit, so there are no
+//     overflow pages.
+//   - A leaf page holds 4088 bytes of cells (4096 minus the 8-byte
+//     page header). One cell is about 4011 bytes (2-byte cell
+//     pointer, 2-byte payload-length varint, payload); two cells
+//     would need about 8022 bytes. Exactly one row fits per leaf
+//     page.
+//
+// So n rows make n leaf pages plus a fixed handful of other pages
+// (page 1 is the schema page; the table b-tree adds a few interior
+// pages). The only per-row variation is the rowid varint (1 byte up
+// to rowid 127, 2 bytes after) — one byte of slack per page that
+// changes nothing. Rewriting a row's x changes exactly that row's
+// leaf page and nothing else.
+func createFixtureDB(t *testing.T, path string, n int) {
 	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("sql.Open(%q): %v", path, err)
+	}
+	_, err = db.Exec("CREATE TABLE t(x, b)")
+	if err != nil {
+		t.Fatalf("CREATE TABLE: %v", err)
+	}
+	if n > 0 {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatalf("Begin: %v", err)
+		}
+		stmt, err := tx.Prepare("INSERT INTO t(x, b) VALUES(?, ?)")
+		if err != nil {
+			t.Fatalf("Prepare: %v", err)
+		}
+		for i := 0; i < n; i++ {
+			_, err = stmt.Exec(1, fixtureBlob)
+			if err != nil {
+				t.Fatalf("INSERT: %v", err)
+			}
+		}
+		err = stmt.Close()
+		if err != nil {
+			t.Fatalf("Close statement: %v", err)
+		}
+		err = tx.Commit()
+		if err != nil {
+			t.Fatalf("Commit: %v", err)
+		}
+	}
+	err = db.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// alterReplicaTableContents rewrites every row of the replica's t
+// table: UPDATE t SET x = x + 1000 turns every x into x + 1000 (so
+// 1 -> 1001). The replica then differs from the origin in every row,
+// which the scenarios that call it rely on: every page's content
+// differs, so pages cross the wire.
+func alterReplicaTableContents(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open(%q): %v", path, err)
+	}
+	_, err = db.Exec("UPDATE t SET x = x + 1000")
+	if err != nil {
+		t.Fatalf("UPDATE: %v", err)
+	}
+	err = db.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+}
+
+// copyFile copies src to dst with 0o644 permissions.
+func copyFile(t *testing.T, src, dst string) {
+	t.Helper()
+	data, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", src, err)
+	}
+	err = os.WriteFile(dst, data, 0o644)
+	if err != nil {
+		t.Fatalf("WriteFile(%q): %v", dst, err)
+	}
+}
+
+// pipeConn wraps the reader and writer ends of a role's connection and
+// counts the bytes read and written — the wire traffic of the role —
+// including the REPLICA_CONFIG/ORIGIN_DETAIL single-byte messages
+// that mark the agghash round. The differential harness passes the C
+// process's pipe ends; runSync passes the ends of the in-memory pipe.
+//
+// Every byte of the protocol crosses these two methods, exactly one
+// call per message piece: all wire primitives (WriteByte, WriteUint32,
+// WritePow2, WriteBytes, WriteMessage, and their read counterparts)
+// end in the connection's Write or Read. That is what makes the
+// counters exact: writes and reads are the raw byte counts of the
+// role's traffic, in and out, and agghashMessages counts the
+// REPLICA_CONFIG and ORIGIN_DETAIL messages the role wrote — the two
+// messages a sync uses to change the size of a hash range. Spotting
+// them is easy: every message starts by putting one byte into the
+// pipe that says which kind of message it is, so a single byte of
+// 0x67 or 0x47 can only be one of these two messages. The count lives
+// on the write side only, because a read can come back in pieces and
+// a stray byte could look like 0x67 or 0x47 by accident.
+type pipeConn struct {
+	read            io.Reader
+	write           io.Writer
+	writes          int64 // bytes the role wrote
+	reads           int64 // bytes the role read
+	agghashMessages int64 // REPLICA_CONFIG and ORIGIN_DETAIL messages written: they exist only in the agghash round
+}
+
+// Read reads from the wrapped reader, counting the bytes.
+func (c *pipeConn) Read(p []byte) (int, error) {
+	n, err := c.read.Read(p)
+	c.reads += int64(n)
+	return n, err
+}
+
+// Write writes to the wrapped writer, counting the bytes, and counts
+// a single-byte REPLICA_CONFIG or ORIGIN_DETAIL message as an agghash
+// message.
+func (c *pipeConn) Write(p []byte) (int, error) {
+	n, err := c.write.Write(p)
+	c.writes += int64(n)
+	if n == 1 && (p[0] == wire.ReplicaConfig || p[0] == wire.OriginDetail) {
+		c.agghashMessages++
+	}
+	return n, err
+}
+
+// traffic is the wire traffic of one Go run: the bytes the Go role
+// wrote and read through the pipe, and the number of REPLICA_CONFIG
+// and ORIGIN_DETAIL messages it wrote — the signature of the agghash
+// round.
+type traffic struct {
+	writes          int64
+	reads           int64
+	agghashMessages int64
+}
+
+// scenario is one differential input: a name, an optional forced
+// protocol version (0 = the latest, like Options.Protocol), and the
+// fixture paths of the origin and replica files the syncs run on.
+// The new* constructors build the fixture files in a fresh
+// directory: the origin file first, then the replica file, which may
+// copy or rewrite the origin.
+type scenario struct {
+	name     string
+	protocol int
+	origin   string
+	replica  string
+}
+
+// newReplicaIsTheSame builds the scenario where nothing differs: the
+// replica is a byte-identical copy of the origin, so no page crosses
+// the wire.
+func newReplicaIsTheSame(t *testing.T, dir string) *scenario {
+	t.Helper()
+	originPath := filepath.Join(dir, "origin.db")
+	createFixtureDB(t, originPath, 50)
+	replicaPath := filepath.Join(dir, "replica.db")
+	copyFile(t, originPath, replicaPath)
+	return &scenario{name: "replica-is-the-same", origin: originPath, replica: replicaPath}
+}
+
+// newReplicaIsDifferent builds the scenario where every row of the
+// replica is rewritten: every page's content differs, so pages cross
+// the wire.
+func newReplicaIsDifferent(t *testing.T, dir string) *scenario {
+	t.Helper()
+	originPath := filepath.Join(dir, "origin.db")
+	createFixtureDB(t, originPath, 50)
+	replicaPath := filepath.Join(dir, "replica.db")
+	createFixtureDB(t, replicaPath, 50)
+	alterReplicaTableContents(t, replicaPath)
+	return &scenario{name: "replica-is-different", origin: originPath, replica: replicaPath}
+}
+
+// newReplicaIsSmaller builds the scenario where the origin is bigger
+// than the replica: the pages the replica never hashed are treated as
+// missing and the replica grows to match. The origin is a 5000-row
+// file — about 5010 pages, ~20 MB.
+func newReplicaIsSmaller(t *testing.T, dir string) *scenario {
+	t.Helper()
+	originPath := filepath.Join(dir, "origin.db")
+	createFixtureDB(t, originPath, 5000)
+	replicaPath := filepath.Join(dir, "replica.db")
+	createFixtureDB(t, replicaPath, 50)
+	return &scenario{name: "replica-is-smaller", origin: originPath, replica: replicaPath}
+}
+
+// newReplicaIsLarger builds the scenario where the origin is smaller
+// than the replica: the ORIGIN_TXN null-insert truncates the replica
+// to the origin's page count. The replica is 95 rows (about 97 pages)
+// — larger than the origin's 52 pages, but under the 100-page
+// threshold, so the scenario stays in the flat round like the other
+// byte scenarios.
+func newReplicaIsLarger(t *testing.T, dir string) *scenario {
+	t.Helper()
+	originPath := filepath.Join(dir, "origin.db")
+	createFixtureDB(t, originPath, 50)
+	replicaPath := filepath.Join(dir, "replica.db")
+	createFixtureDB(t, replicaPath, 95)
+	return &scenario{name: "replica-is-larger", origin: originPath, replica: replicaPath}
+}
+
+// newReplicaIsAbsent builds the scenario with no replica file at all:
+// the empty-replica init materializes the header page and every page
+// of the origin crosses the wire. The origin is a 5000-row file —
+// about 5010 pages, ~20 MB.
+func newReplicaIsAbsent(t *testing.T, dir string) *scenario {
+	t.Helper()
+	originPath := filepath.Join(dir, "origin.db")
+	createFixtureDB(t, originPath, 5000)
+	return &scenario{name: "replica-is-absent", origin: originPath, replica: filepath.Join(dir, "replica.db")}
+}
+
+// newReplicaIsWal builds the scenario with a rollback-mode origin and
+// a WAL-mode replica with every row rewritten: the page-1 write-
+// version fix must keep the replica in WAL mode.
+func newReplicaIsWal(t *testing.T, dir string) *scenario {
+	t.Helper()
+	originPath := filepath.Join(dir, "origin.db")
+	createFixtureDB(t, originPath, 50)
+	replicaPath := filepath.Join(dir, "replica.db")
+	createFixtureDB(t, replicaPath, 50)
+	db, err := sql.Open("sqlite", replicaPath)
+	if err != nil {
+		t.Fatalf("sql.Open(%q): %v", replicaPath, err)
+	}
+	_, err = db.Exec("PRAGMA journal_mode=WAL")
+	if err != nil {
+		t.Fatalf("journal_mode=WAL: %v", err)
+	}
+	err = db.Close()
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	alterReplicaTableContents(t, replicaPath)
+	return &scenario{name: "replica-is-wal", origin: originPath, replica: replicaPath}
+}
+
+// newReplicaProtocolIs1 builds the scenario where protocol 1 sends one
+// hash per page: every page of the origin crosses the wire as singles.
+// The origin is a 5000-row file — about 5010 pages, ~20 MB.
+func newReplicaProtocolIs1(t *testing.T, dir string) *scenario {
+	t.Helper()
+	originPath := filepath.Join(dir, "origin.db")
+	createFixtureDB(t, originPath, 5000)
+	replicaPath := filepath.Join(dir, "replica.db")
+	createFixtureDB(t, replicaPath, 50)
+	alterReplicaTableContents(t, replicaPath)
+	return &scenario{name: "replica-protocol-is-1", protocol: 1, origin: originPath, replica: replicaPath}
+}
+
+// result is what one Go run produced: the scenario it ran, the run's
+// outcome and the wire traffic. The assert methods of the sync and
+// differential suites live on it; each reads what it checks from the
+// run's fields, plus the parameters it takes.
+type result struct {
+	t        *testing.T
+	scenario *scenario
+	goErr    error
+	stderr   string
+	traffic  traffic
+}
+
+// replicaAgghash returns the whole-file agghash of a database file:
+// the agghash of the per-page hashes of every page except page 1. The
+// sync rewrites page 1's change counter and version bytes on commit,
+// and the C binary and modernc embed different version numbers there,
+// so page 1 is the machinery page — the content comparison starts at
+// page 2. A page-size or page-count mismatch changes the page layout
+// and therefore the hash, so this one value covers content, size and
+// count at once.
+func replicaAgghash(t *testing.T, path string) []byte {
+	t.Helper()
+	err := hash.Register()
+	if err != nil {
+		t.Fatalf("hash.Register: %v", err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open(%q): %v", path, err)
+	}
+	defer func() {
+		_ = db.Close()
+	}()
+	var sum []byte
+	err = db.QueryRow("SELECT agghash(hash(data)) FROM sqlite_dbpage('main') WHERE pgno > 1 ORDER BY pgno").Scan(&sum)
+	if err != nil {
+		t.Fatalf("agghash(%q): %v", path, err)
+	}
+	return sum
+}
+
+// assertSucceeded fails the test unless the run's Go role returned no
+// error; the C process's stderr is included in the failure message.
+func (r result) assertSucceeded() {
+	r.t.Helper()
+	if r.goErr != nil {
+		r.t.Fatalf("scenario %s: %v\nC stderr:\n%s", r.scenario.name, r.goErr, r.stderr)
+	}
+}
+
+// assertReplicaAgghashSame fails the test unless the replica's
+// whole-file agghash equals the origin's: the sync's content result.
+func (r result) assertReplicaAgghashSame() {
+	r.t.Helper()
+	got := replicaAgghash(r.t, r.scenario.replica)
+	want := replicaAgghash(r.t, r.scenario.origin)
+	if !bytes.Equal(got, want) {
+		r.t.Fatalf("replica agghash %x, origin agghash %x", got, want)
+	}
+}
+
+// assertIntegrity fails the test unless the replica passes
+// PRAGMA integrity_check.
+func (r result) assertIntegrity() {
+	r.t.Helper()
+	db, err := sql.Open("sqlite", r.scenario.replica)
+	if err != nil {
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.replica, err)
 	}
 	defer func() {
 		_ = db.Close()
@@ -151,44 +412,87 @@ func assertIntegrity(t *testing.T, path string) {
 	var result string
 	err = db.QueryRow("PRAGMA integrity_check").Scan(&result)
 	if err != nil {
-		t.Fatalf("integrity_check: %v", err)
+		r.t.Fatalf("integrity_check: %v", err)
 	}
 	if result != "ok" {
-		t.Fatalf("integrity_check = %q, want ok", result)
+		r.t.Fatalf("integrity_check = %q, want ok", result)
 	}
 }
 
-// xColumn returns the x column of the t table of a database, ordered
-// by value — the content both sides hold, for comparing databases
-// whose files are not byte-comparable (WAL mode).
-func xColumn(t *testing.T, path string) []int64 {
-	t.Helper()
-	db, err := sql.Open("sqlite", path)
+// assertWalMode fails the test unless the replica is still in WAL
+// mode: the sync must preserve the replica's journal mode.
+func (r result) assertWalMode() {
+	r.t.Helper()
+	db, err := sql.Open("sqlite", r.scenario.replica)
 	if err != nil {
-		t.Fatalf("sql.Open(%q): %v", path, err)
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.replica, err)
 	}
 	defer func() {
 		_ = db.Close()
 	}()
-	rows, err := db.Query("SELECT x FROM t ORDER BY x")
+	var mode string
+	err = db.QueryRow("PRAGMA journal_mode").Scan(&mode)
 	if err != nil {
-		t.Fatalf("SELECT: %v", err)
+		r.t.Fatalf("journal_mode: %v", err)
+	}
+	if mode != "wal" {
+		r.t.Fatalf("journal_mode = %q, want wal", mode)
+	}
+}
+
+// assertPage1VersionsWal fails the test unless the replica's page 1
+// carries the WAL write versions 2,2 (bytes 18-19): the page-1
+// write-version fix that keeps the replica in WAL mode.
+func (r result) assertPage1VersionsWal() {
+	r.t.Helper()
+	db, err := sql.Open("sqlite", r.scenario.replica)
+	if err != nil {
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.replica, err)
 	}
 	defer func() {
-		_ = rows.Close()
+		_ = db.Close()
 	}()
-	var out []int64
-	for rows.Next() {
-		var x int64
-		err := rows.Scan(&x)
-		if err != nil {
-			t.Fatalf("Scan: %v", err)
-		}
-		out = append(out, x)
-	}
-	err = rows.Err()
+	var page1 []byte
+	err = db.QueryRow("SELECT data FROM sqlite_dbpage('main') WHERE pgno=1").Scan(&page1)
 	if err != nil {
-		t.Fatalf("rows.Err: %v", err)
+		r.t.Fatalf("dbpage: %v", err)
 	}
-	return out
+	if page1[18] != 2 || page1[19] != 2 {
+		r.t.Fatalf("replica page 1 versions = %d,%d, want 2,2 (WAL kept)", page1[18], page1[19])
+	}
+}
+
+// assertRowsSame fails the test unless the replica holds the origin's
+// rows — the content check for WAL-mode replicas, whose writes land
+// in the -wal file and whose main file is not byte-comparable. The
+// fixture's content is constant (x=1, b=fixtureBlob in every row), so
+// the rows are the same exactly when the counts are.
+func (r result) assertRowsSame() {
+	r.t.Helper()
+	replicaDB, err := sql.Open("sqlite", r.scenario.replica)
+	if err != nil {
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.replica, err)
+	}
+	defer func() {
+		_ = replicaDB.Close()
+	}()
+	originDB, err := sql.Open("sqlite", r.scenario.origin)
+	if err != nil {
+		r.t.Fatalf("sql.Open(%q): %v", r.scenario.origin, err)
+	}
+	defer func() {
+		_ = originDB.Close()
+	}()
+	var got, want int
+	err = replicaDB.QueryRow("SELECT count(*) FROM t").Scan(&got)
+	if err != nil {
+		r.t.Fatalf("count(*): %v", err)
+	}
+	err = originDB.QueryRow("SELECT count(*) FROM t").Scan(&want)
+	if err != nil {
+		r.t.Fatalf("count(*): %v", err)
+	}
+	if got != want {
+		r.t.Fatalf("replica has %d rows, want %d", got, want)
+	}
 }
