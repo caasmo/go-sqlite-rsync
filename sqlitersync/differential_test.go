@@ -91,6 +91,14 @@ func runSqlite3_rsync(ctx context.Context, role, originPath, replicaPath string,
 }
 
 // newPipe creates one OS pipe, failing the test if the syscall errors.
+//
+// An OS pipe is unidirectional: data written to the write end can
+// only be read from the read end, never the other way around. A sync
+// needs traffic in both directions, so every runner here creates two
+// pipes: syncGoWithC wires one pipe from the Go role into the C
+// process's stdin and one from the C process's stdout back to the Go
+// role; syncCWithC feeds each process's stdout into the other's
+// stdin.
 func newPipe(t *testing.T) (read, write *os.File) {
 	t.Helper()
 	read, write, err := os.Pipe()
