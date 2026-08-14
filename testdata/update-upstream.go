@@ -1,4 +1,4 @@
-// update-upstream-sqlite3_rsync keeps the pinned reference C source
+// update-upstream keeps the pinned reference C source
 // (testdata/sqlite3_rsync.c) current with the latest sqlite3_rsync
 // from sqlite.org, and verifies the Go port against the compiled
 // binary of that release.
@@ -24,7 +24,7 @@
 // automated: it is a judgment call. See testdata/README.md "Upstream
 // sync" and the upstream-sync guide.
 //
-// Run from the repo root: go run ./testdata/update-upstream-sqlite3_rsync.go
+// Run from the repo root: go run ./testdata/update-upstream.go
 //
 // # The download page
 //

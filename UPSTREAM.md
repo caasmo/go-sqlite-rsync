@@ -17,16 +17,16 @@ sqlite3_rsync is a small C program from the SQLite project that syncs two SQLite
 
 From the repo root:
 
-	go run ./testdata/update-upstream-sqlite3_rsync.go
+	go run ./testdata/update-upstream.go
 
-The update script (`testdata/update-upstream-sqlite3_rsync.go`) does the following, in order:
+The update script (`testdata/update-upstream.go`) does the following, in order:
 
-1. Find the latest SQLite release. The sqlite.org download page embeds a machine-readable list of the current releases; each row names a zip, its URL, its size, and its SHA3-256 hash. The script reads that list.
-2. Download the release's two zips and verify each against its published SHA3-256 hash, a checksum that proves the download is intact; a mismatch stops the run. The zips go to a temporary directory and are removed when the run ends. The two zips are the source zip (`sqlite-src-*.zip`, the full SQLite source tree, which contains `tool/sqlite3_rsync.c`) and the amalgamation zip (`sqlite-amalgamation-*.zip`, just the SQLite library, which the script needs to build a binary).
-3. Compare the new `tool/sqlite3_rsync.c` with the committed source. If they differ, the new file replaces the committed one and the script prints the audit steps (see below).
-4. Build the reference binary from the committed source and the amalgamation: a compiled `sqlite3_rsync` to test the port against.
-5. Run the differential suite against the reference binary: Go tests that require the Go port to behave identically to the C binary.
-6. Move the version file (`testdata/sqlite3_rsync_version.json`) to the latest release, but only if the suite passed. A failing suite stops the run without touching the file.
+1. Finds the latest SQLite release. The sqlite.org download page embeds a machine-readable list of the current releases; each row names a zip, its URL, its size, and its SHA3-256 hash.
+2. Downloads the release's two zips and verifies each against its published SHA3-256 hash, a checksum that proves the download is intact; a mismatch stops the run. The zips go to a temporary directory and are removed when the run ends. The two zips are the source zip (`sqlite-src-*.zip`, the full SQLite source tree, which contains `tool/sqlite3_rsync.c`) and the amalgamation zip (`sqlite-amalgamation-*.zip`, just the SQLite library, which the script needs to build a binary).
+3. Compares the new `tool/sqlite3_rsync.c` with the committed source. If they differ, the new file replaces the committed one and the script prints the audit steps (see below).
+4. Builds the reference binary from the committed source and the amalgamation: a compiled `sqlite3_rsync` to test the port against.
+5. Runs the differential suite against the reference binary: Go tests that require the Go port to behave identically to the C binary.
+6. Moves the version file (`testdata/sqlite3_rsync_version.json`) to the latest release, but only if the suite passed. A failing suite stops the run without touching the file.
 
 ## Audit if source code changes
 
