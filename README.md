@@ -17,7 +17,7 @@ Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delt
 - [Usage](#usage)
 - [Porting notes](#porting-notes)
 - [Differential Test](#differential-test)
-- [The sqlite3_rsync protocol](#the-sqlite3_rsync-protocol)
+- [The sqlite3_rsync protocol](#the-sqlite3_rsync-protocol) (see also [sqlitersync/README.md](sqlitersync/README.md))
 - [SQLite sync approaches compared](#sqlite-sync-approaches-compared)
 
 ## Usage
@@ -59,6 +59,8 @@ go test -tags differential ./...
 ```
 
 ## The sqlite3_rsync protocol
+
+A full walkthrough of the wire protocol — the message flow, the hash exchange and every message in detail — is in [sqlitersync/README.md](sqlitersync/README.md).
 
 This library implements the [sqlite3_rsync protocol](https://sqlite.org/rsync.html), a wire protocol designed by the SQLite developers for keeping two copies of a SQLite database in sync over a network. It is inspired by — and named after — rsync, but it is a custom protocol, not the rsync protocol. Like rsync it transfers only what changed, but it is specific to SQLite files; ordinary rsync does not understand SQLite and cannot be used for this — the protocol's official page explains [why](https://sqlite.org/rsync.html#why_can_t_i_just_use_ordinary_rsync_).
 

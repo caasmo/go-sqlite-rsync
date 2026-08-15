@@ -122,3 +122,16 @@ The differential assertions compare replicas byte-for-byte with a header mask (`
 - `sqlitersync/sync_test.go` — 5 call sites (L94, L166, L187, L208, L320)
 - `sqlitersync/differential_test.go` — `assertByteSynced` (L658) uses it; impl-testdifferential-refactor-design.md deletes that use and replaces it with the `AssertIntegrity` method on `Result`
 
+# docs: we need docs about concurrency
+
+- `README.md` — the docs; "Porting notes" covers deviations from the C program but says nothing about concurrency
+- `sqlitersync/sync.go` — `Origin`/`Replica` run each side in its own goroutine; the concurrency the docs would describe
+- `sqlitersync/sync_test.go` — `runSync` runs both roles concurrently over `net.Pipe` (L223-227)
+
+# sync: document cancelation: two ways: context, function on message boundaries, and connection on writes/read on the reader
+
+- `sqlitersync/sync.go` — `ctxStream` (L117-147) checks `ctx` before every message read/write (the context way, on message boundaries); a peer closing the stream fails the blocked read/write (the connection way)
+- `sqlitersync/sync_test.go` — `TestCancel` (L169-183) proves a cancelled context ends both sides with `context.Canceled`
+- `README.md` — "Porting notes": Context support deviation (L48), the documented cancellation contract
+- `sqlitersync/doc.go` — package doc, Context mention (L57-61)
+
