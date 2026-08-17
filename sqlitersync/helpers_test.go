@@ -280,9 +280,11 @@ func newReplicaProtocolIs1(t *testing.T, dir string) *scenario {
 }
 
 // result is what one Go run produced: the scenario it ran, the run's
-// outcome and its per-run statistics. The assert methods of the sync
-// and differential suites live on it; each reads what it checks from
-// the run's fields, plus the parameters it takes.
+// outcome and its per-run statistics. The assert methods shared by
+// the sync and differential suites live on it; each reads what it
+// checks from the run's fields, plus the parameters it takes. The
+// differential suite's own asserts live on differentialResult, which
+// adds the harness's agghash-round traffic.
 type result struct {
 	t        *testing.T
 	scenario *scenario

@@ -145,24 +145,34 @@ func (c *pipeConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// traffic is the wire traffic of one Go run: the number of
+// traffic is the wire traffic of one differential run: the number of
 // REPLICA_CONFIG and ORIGIN_DETAIL messages the role wrote — the
-// signature of the agghash round. The run's byte counters live in its
-// Stats.
+// signature of the agghash round, which only the differential harness
+// measures. The run's byte counters live in the result's Stats.
 type traffic struct {
 	agghashMessages int64
+}
+
+// differentialResult is what one differential run produced: the
+// shared run result plus the run's agghash-round traffic, which the
+// harness measures with pipeConn. The sync suite's runs do not
+// measure it, so the shared result carries no traffic; the asserts
+// that read it live on this type.
+type differentialResult struct {
+	result
+	traffic traffic
 }
 
 // syncGoWithC runs a real sync: the Go library plays one role, the C
 // binary the other, connected over pipes. goRole picks the Go role —
 // "origin" or "replica"; the C binary always plays the other.
 //
-// It returns the run's result — the scenario it ran, the Go role's
-// error (nil on a clean run), the C process's stderr and the run's
-// per-run statistics — and the run's agghash-round traffic. Harness
-// failures — the process not starting, or not exiting after a clean
-// Go run — fail the test directly.
-func syncGoWithC(t *testing.T, goRole string, sc *scenario) (result, traffic) {
+// It returns the run's result: the scenario it ran, the Go role's
+// error (nil on a clean run), the C process's stderr, the run's
+// per-run statistics and its agghash-round traffic. Harness failures
+// — the process not starting, or not exiting after a clean Go run —
+// fail the test directly.
+func syncGoWithC(t *testing.T, goRole string, sc *scenario) differentialResult {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -273,25 +283,28 @@ func syncGoWithC(t *testing.T, goRole string, sc *scenario) (result, traffic) {
 		t.Fatalf("C %s: %v\nstderr:\n%s", otherRole, waitErr, stderr.String())
 	}
 
-	return result{
-		t:        t,
-		scenario: sc,
-		goErr:    goErr,
-		stderr:   stderr.String(),
-		stats:    goStats,
-	}, traffic{agghashMessages: conn.agghashMessages}
+	return differentialResult{
+		result: result{
+			t:        t,
+			scenario: sc,
+			goErr:    goErr,
+			stderr:   stderr.String(),
+			stats:    goStats,
+		},
+		traffic: traffic{agghashMessages: conn.agghashMessages},
+	}
 }
 
 // syncGoToC runs the scenario with the Go library as origin and the C
-// binary as replica, and returns the run's result and its traffic.
-func syncGoToC(t *testing.T, sc *scenario) (result, traffic) {
+// binary as replica, and returns the run's result.
+func syncGoToC(t *testing.T, sc *scenario) differentialResult {
 	t.Helper()
 	return syncGoWithC(t, originRole, sc)
 }
 
 // syncCToGo runs the scenario with the C binary as origin and the Go
-// library as replica, and returns the run's result and its traffic.
-func syncCToGo(t *testing.T, sc *scenario) (result, traffic) {
+// library as replica, and returns the run's result.
+func syncCToGo(t *testing.T, sc *scenario) differentialResult {
 	t.Helper()
 	return syncGoWithC(t, replicaRole, sc)
 }
@@ -450,7 +463,7 @@ func (r result) assertReplicaAgghashSameAs(referenceReplicaPath string) {
 // traffic — must equal the other run's BytesSent — the Go replica's
 // traffic. Any divergence — a resend of pages C would not send, a
 // hash C would not send — breaks the equality.
-func (r result) assertTrafficSameAs(other result) {
+func (r differentialResult) assertTrafficSameAs(other differentialResult) {
 	r.t.Helper()
 	if r.stats.BytesSent != other.stats.BytesReceived {
 		r.t.Fatalf("Go origin sent %d bytes, C origin sent %d", r.stats.BytesSent, other.stats.BytesReceived)
@@ -470,9 +483,9 @@ func (r result) assertTrafficSameAs(other result) {
 // by assertTrafficSameAs instead, whose byte-for-byte equality with C
 // proves the same refinement rounds ran. The flat scenarios call the
 // complementary assertAgghashRoundNotRan.
-func (r result) assertAgghashRoundRan(tr traffic) {
+func (r differentialResult) assertAgghashRoundRan() {
 	r.t.Helper()
-	if tr.agghashMessages == 0 {
+	if r.traffic.agghashMessages == 0 {
 		r.t.Fatalf("Go replica sent no REPLICA_CONFIG/ORIGIN_DETAIL: the agghash round did not run")
 	}
 }
@@ -485,10 +498,10 @@ func (r result) assertAgghashRoundRan(tr traffic) {
 // (A spurious grouped round would also break assertTrafficSameAs — it
 // inflates only the one combo that runs it — but this pins the
 // flatness directly, with a message that says which round ran.)
-func (r result) assertAgghashRoundNotRan(tr traffic) {
+func (r differentialResult) assertAgghashRoundNotRan() {
 	r.t.Helper()
-	if tr.agghashMessages > 0 {
-		r.t.Fatalf("Go replica sent %d REPLICA_CONFIG/ORIGIN_DETAIL messages, want none (flat round)", tr.agghashMessages)
+	if r.traffic.agghashMessages > 0 {
+		r.t.Fatalf("Go replica sent %d REPLICA_CONFIG/ORIGIN_DETAIL messages, want none (flat round)", r.traffic.agghashMessages)
 	}
 }
 
