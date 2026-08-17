@@ -13,18 +13,21 @@ import (
 // mirrors that — both roles live in this package and share the SQL
 // helpers below.
 type rsync struct {
-	db          *sql.DB      // database connection (p->db)
-	r           *wire.Reader // receive from the other side (p->pIn)
-	w           *wire.Writer // transmit to the other side (p->pOut)
-	originPath  string       // name of the origin (p->zOrigin)
-	replicaPath string       // name of the replica (p->zReplica)
-	protocol    int          // protocol version number (p->iProtocol)
-	pageSize    int          // database page size (p->szPage)
-	pageCount   uint32       // total number of pages (p->nPage)
-	walOnly     bool         // require WAL mode (p->bWalOnly)
-	commCheck   bool         // debug the communication protocol (p->bCommCheck)
-	isReplica   bool         // running on the replica side (p->isReplica)
-	wrongEnc    bool         // ATTACH failed due to wrong encoding (p->wrongEncoding)
+	db            *sql.DB      // database connection (p->db)
+	r             *wire.Reader // receive from the other side (p->pIn)
+	w             *wire.Writer // transmit to the other side (p->pOut)
+	originPath    string       // name of the origin (p->zOrigin)
+	replicaPath   string       // name of the replica (p->zReplica)
+	protocol      int          // protocol version number (p->iProtocol)
+	pageSize      int          // database page size (p->szPage)
+	pageCount     uint32       // total number of pages (p->nPage)
+	hashMessages  uint64       // hashes sent/received (p->nHashSent)
+	hashRounds    uint32       // hash-exchange rounds (p->nRound)
+	pageUpdates   uint32       // page contents transferred (p->nPageSent)
+	walOnly       bool         // require WAL mode (p->bWalOnly)
+	commCheck     bool         // debug the communication protocol (p->bCommCheck)
+	isReplica     bool         // running on the replica side (p->isReplica)
+	wrongEnc      bool         // ATTACH failed due to wrong encoding (p->wrongEncoding)
 }
 
 // attachSQL returns the SQL that attaches the replica database file to

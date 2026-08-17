@@ -248,6 +248,9 @@ func originSide(s *rsync) (err error) {
 					err = errors.Join(err, pInsHash.Close())
 				}()
 			}
+			// C counts the hash before reading its bytes
+			// (sqlite3_rsync.c L1474-1475).
+			s.hashMessages++
 			rcvHash, readErr := s.r.ReadBytes(20)
 			if readErr != nil {
 				return readErr
@@ -302,6 +305,8 @@ func originSide(s *rsync) (err error) {
 			}
 			iHash += nHash
 		case wire.ReplicaReady:
+			// One hash-exchange round per REPLICA_READY (C L1536).
+			s.hashRounds++
 			// Send ORIGIN_DETAIL for every multi-page entry, then
 			// either request a finer round (ORIGIN_READY) or send the
 			// pages (C L1530-1596).
@@ -391,7 +396,12 @@ func originSide(s *rsync) (err error) {
 					if readErr != nil {
 						return s.w.WriteError(s.errMsgByte(), "SQL statement [%s] failed: %s", pageDataSQL, readErr)
 					}
-					readErr = s.w.WriteByte(wire.OriginPage)
+					// C counts the page even when its writes fail: the
+				// write primitives are void, and the loop aborts on
+				// nWrErr only at the next iteration
+				// (sqlite3_rsync.c L1572-1581).
+				s.pageUpdates++
+				readErr = s.w.WriteByte(wire.OriginPage)
 					if readErr != nil {
 						return readErr
 					}

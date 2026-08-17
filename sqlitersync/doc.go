@@ -43,17 +43,20 @@
 // Each side is one function; each blocks for the duration of a sync
 // and returns when the replica matches the origin:
 //
-//	Origin(ctx, rw, "origin.db", nil)   // from the side that is up to date
-//	Replica(ctx, rw, "replica.db", nil) // from the side being brought up to date
+//	_, err := Origin(ctx, rw, "origin.db", nil)       // from the side that is up to date
+//	stats, err := Replica(ctx, rw, "replica.db", nil) // from the side being brought up to date
 //
 // # Deviations from the C source
 //
 //   - Command-line layer: the C program's main() starts the peer
-//     process over SSH, prints informational messages to a terminal
-//     and reports transfer statistics; the library omits all of that —
-//     the caller supplies a connected io.ReadWriter for each side, and
-//     each role returns an error for the caller to report (see the
-//     README's porting notes).
+//     process over SSH and prints informational messages to a
+//     terminal; the library omits all of that — the caller supplies a
+//     connected io.ReadWriter for each side. Each role returns the
+//     run's per-run summary (Stats) — the C transfer statistics as
+//     data, not display — plus the run's error; the presentation
+//     values of the C -v printout (bytes/sec, speedup) are computed
+//     by the caller from Stats and the elapsed time (see the README's
+//     porting notes).
 //   - Context: Origin and Replica take a context.Context, the one
 //     Go-native addition (the C program has none, sqlite3_rsync.c
 //     L1363, L1756). Cancellation is checked between protocol

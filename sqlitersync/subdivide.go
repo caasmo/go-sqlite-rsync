@@ -53,6 +53,11 @@ func (s *rsync) sendHashMessages(iHash, nHash uint32) (err error) {
 		if err != nil {
 			return s.w.WriteError(wire.ReplicaError, "SQL statement [%s] failed: %s", sendHashSQL, err)
 		}
+		// C counts every entry, including NULL-hash ones that emit
+		// no message (sqlite3_rsync.c L1665); the count happens
+		// even when a write fails, since the loop aborts on nWrErr
+		// only at the next iteration (L1641).
+		s.hashMessages++
 		if fpg != iHash || npg != nHash {
 			err = s.w.WriteByte(wire.ReplicaConfig)
 			if err != nil {
@@ -90,7 +95,12 @@ func (s *rsync) sendHashMessages(iHash, nHash uint32) (err error) {
 	if err != nil {
 		return err
 	}
-	return s.w.WriteByte(wire.ReplicaReady)
+	err = s.w.WriteByte(wire.ReplicaReady)
+	// C's writeByte ignores the fputc result, so the round always
+	// counts (sqlite3_rsync.c L1673); the port counts the same way,
+	// even when its own write fails.
+	s.hashRounds++
+	return err
 }
 
 // subdivideHashRange makes entries in the sendHash table to send
