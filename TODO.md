@@ -135,3 +135,11 @@ The differential assertions compare replicas byte-for-byte with a header mask (`
 - `README.md` — "Porting notes": Context support deviation (L48), the documented cancellation contract
 - `sqlitersync/doc.go` — package doc, Context mention (L57-61)
 
+# sqlitersync: make real performance test comparing C and Go version
+
+A throwaway comparison (Go vs Go over net.Pipe against C vs C on the same replica-is-absent fixture, both including fixture creation) measured the Go port at parity with the C binary: ratio 0.90-1.07 across three runs. A real performance test would pin that: benchmark the same scenarios through `runSync` (Go-Go) and `syncCToC` (C-C), assert a bounded Go/C ratio as a regression gate, and record the numbers.
+
+- `sqlitersync/differential_test.go` — `syncCToC` (C vs C), `syncGoToC`/`syncCToGo` (Go vs C); the harness that runs the reference binary
+- `sqlitersync/sync_test.go` — `runSync` (Go vs Go over net.Pipe), the Go-side counterpart of `syncCToC`
+- `references/sqlite-src-3530400/tool/sqlite3_rsync.c` — the C counterpart; `-v` summary (L2392-2423) reports its own bytes/sec
+
