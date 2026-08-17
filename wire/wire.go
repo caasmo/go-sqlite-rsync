@@ -89,9 +89,17 @@ const (
 // Reader frames reads from an underlying stream. Port of the framing
 // primitives of sqlite3_rsync.c (L971-1066): the C functions report
 // failures through logError and the nErr counter; the port returns
-// Go errors.
+// Go errors. The byte counter mirrors the C nIn counter
+// (sqlite3_rsync.c L68).
 type Reader struct {
-	r io.Reader
+	r         io.Reader
+	bytesRead uint64 // bytes received from the stream (C nIn)
+}
+
+// BytesRead returns the number of bytes read from the stream since
+// the Reader was created, counted exactly where C counts.
+func (r *Reader) BytesRead() uint64 {
+	return r.bytesRead
 }
 
 // NewReader returns a Reader that frames reads from r.
@@ -110,6 +118,9 @@ func (r *Reader) ReadByte() (byte, error) {
 	if err != nil {
 		return 0, err
 	}
+	// C counts the byte only when fgetc did not return EOF
+	// (sqlite3_rsync.c L1012).
+	r.bytesRead++
 	return buf[0], nil
 }
 
@@ -123,6 +134,8 @@ func (r *Reader) ReadUint32() (uint32, error) {
 	if err != nil {
 		return 0, err
 	}
+	// C counts only a full read (sqlite3_rsync.c L978).
+	r.bytesRead += 4
 	return uint32(buf[0])<<24 | uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3]), nil
 }
 
@@ -155,15 +168,25 @@ func (r *Reader) ReadBytes(nByte int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// C counts only a full read (sqlite3_rsync.c L1050).
+	r.bytesRead += uint64(nByte)
 	return buf, nil
 }
 
 // Writer frames writes to an underlying stream. Port of the framing
 // primitives of sqlite3_rsync.c (L971-1066): the C functions report
 // failures through logError and the nWrErr counter; the port returns
-// Go errors.
+// Go errors. The byte counter mirrors the C nOut counter
+// (sqlite3_rsync.c L67).
 type Writer struct {
-	w io.Writer
+	w            io.Writer
+	bytesWritten uint64 // bytes transmitted to the stream (C nOut)
+}
+
+// BytesWritten returns the number of bytes written to the stream since
+// the Writer was created, counted exactly where C counts.
+func (w *Writer) BytesWritten() uint64 {
+	return w.bytesWritten
 }
 
 // NewWriter returns a Writer that frames writes to w.
@@ -173,9 +196,21 @@ func NewWriter(w io.Writer) *Writer {
 
 // WriteByte writes a single byte to the stream. Port of writeByte
 // (sqlite3_rsync.c L1018-1022): the C function ignores the fputc
-// result; the port returns the error.
+// result; the port returns the error. C counts the byte regardless of
+// the write's outcome (L1021), and the port mirrors that.
 func (w *Writer) WriteByte(b byte) error {
-	return w.WriteBytes([]byte{b})
+	n, err := w.w.Write([]byte{b})
+	w.bytesWritten++
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		// The same short-write guard as WriteBytes: a writer may
+		// return fewer bytes with no error, and a silently lost
+		// message byte would hang the peer.
+		return io.ErrShortWrite
+	}
+	return nil
 }
 
 // WriteUint32 writes a single big-endian 32-bit unsigned integer to
@@ -228,6 +263,8 @@ func (w *Writer) WriteBytes(p []byte) error {
 	if n != len(p) {
 		return io.ErrShortWrite
 	}
+	// C counts only a full write (sqlite3_rsync.c L1060-1061).
+	w.bytesWritten += uint64(len(p))
 	return nil
 }
 
@@ -235,10 +272,18 @@ func (w *Writer) WriteBytes(p []byte) error {
 // the payload length as a 32-bit number, then the payload bytes — the
 // wire format of the C *_MSG and *_ERROR messages (sqlite3_rsync.c
 // L1081-1089, L1110-1118).
+//
+// The message-type byte goes out uncounted: C sends it with putc,
+// which does not touch the nOut counter (reportError L1083-1088,
+// infoMsg L1112-1117), so writing it through WriteByte — which counts
+// — would diverge from C by one byte per message.
 func (w *Writer) WriteMessage(msgByte byte, payload []byte) error {
-	err := w.WriteByte(msgByte)
+	n, err := w.w.Write([]byte{msgByte})
 	if err != nil {
 		return err
+	}
+	if n != 1 {
+		return io.ErrShortWrite
 	}
 	err = w.WriteUint32(uint32(len(payload)))
 	if err != nil {

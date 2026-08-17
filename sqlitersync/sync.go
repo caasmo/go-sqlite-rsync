@@ -47,11 +47,38 @@ type Options struct {
 	AllowNonWal bool
 }
 
+// Stats is a per-run summary of one side of a sync: the bytes and
+// messages that crossed the wire and the shape of the origin
+// database. Port of the C statistics counters (sqlite3_rsync.c L48-74);
+// the derived presentation values of the C -v printout (L2392-2423) —
+// bytes/sec, total size and speedup — are computed from these fields by
+// the caller, which also measures the elapsed time. Each side reports
+// its own traffic: Origin returns the origin's
+// view, Replica the replica's. For an in-process pair, sum the two
+// sides' byte counters (BytesSent, BytesReceived) for the whole
+// exchange; the message counters are per-side views — HashRounds and
+// PageUpdates match on a successful run, HashMessages may differ (the
+// replica counts NULL-hash entries that never send a message) — and
+// PageCount, PageSize and Protocol describe the origin database, not
+// the traffic.
+type Stats struct {
+	BytesSent     uint64 // bytes this side wrote to the stream (C nOut)
+	BytesReceived uint64 // bytes this side read from the stream (C nIn)
+	HashMessages  uint64 // REPLICA_HASH entries this side sent (replica) or received (origin) (C nHashSent)
+	HashRounds    uint32 // hash-exchange rounds, one per REPLICA_READY (C nRound)
+	PageUpdates   uint32 // pages transferred: sent by the origin, received by the replica (C nPageSent)
+	PageCount     uint32 // page count of the origin database (C nPage)
+	PageSize      int    // page size of the origin database, in bytes (C szPage)
+	Protocol      int    // protocol version in effect, after negotiation (C iProtocol)
+}
+
 // Origin runs the origin side of a sync: the side that owns the
 // up-to-date database. It opens the database at originPath, announces
 // its configuration to the replica over rw, verifies every hash the
 // replica sends, and streams back only the pages that differ. It
-// blocks until the sync ends and returns the run's error, if any.
+// blocks until the sync ends and returns the run's per-run summary
+// (Stats) and the run's error, if any — the summary is also returned
+// when the run fails, holding the partial counts.
 //
 // The caller owns rw: the roles never close it. When the run ends,
 // the caller closes the stream, so the other side's blocked read
@@ -63,24 +90,45 @@ type Options struct {
 // write notices only when that I/O completes or the stream closes.
 // A nil ctx is never cancelled. The C program has no context; this is
 // the one Go-native addition.
-func Origin(ctx context.Context, rw io.ReadWriter, originPath string, opts *Options) error {
+func Origin(ctx context.Context, rw io.ReadWriter, originPath string, opts *Options) (Stats, error) {
 	s := newRsync(ctx, rw, opts)
 	s.originPath = originPath
-	return originSide(s)
+	err := originSide(s)
+	return s.stats(), err
 }
 
 // Replica runs the replica side of a sync: the side being brought up
 // to date. It opens the database at replicaPath, sends the hashes of
 // its pages to the origin over rw, and writes back the pages the
 // origin sends, in one transaction. It blocks until the sync ends and
-// returns the run's error, if any. The caller owns rw and closes it
+// returns the run's per-run summary (Stats) and the run's error, if
+// any — the summary is also returned when the run fails, holding the
+// partial counts. The caller owns rw and closes it
 // when the run ends; ctx cancels the run like Origin (nil is never
 // cancelled) — the context is checked between messages, so a blocked
 // read or write is not interrupted.
-func Replica(ctx context.Context, rw io.ReadWriter, replicaPath string, opts *Options) error {
+func Replica(ctx context.Context, rw io.ReadWriter, replicaPath string, opts *Options) (Stats, error) {
 	s := newRsync(ctx, rw, opts)
 	s.replicaPath = replicaPath
-	return replicaSide(s)
+	err := replicaSide(s)
+	return s.stats(), err
+}
+
+// stats assembles the per-run summary: the byte counters from the
+// wire reader and writer and the message counters and database shape
+// from the run state. The derived values of the C -v printout
+// (bytes/sec, speedup) are computed by the caller.
+func (s *rsync) stats() Stats {
+	return Stats{
+		BytesSent:     s.w.BytesWritten(),
+		BytesReceived: s.r.BytesRead(),
+		HashMessages:  s.hashMessages,
+		HashRounds:    s.hashRounds,
+		PageUpdates:   s.pageUpdates,
+		PageCount:     s.pageCount,
+		PageSize:      s.pageSize,
+		Protocol:      s.protocol,
+	}
 }
 
 // newRsync builds the state of one sync run from the public options.

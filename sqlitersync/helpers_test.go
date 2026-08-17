@@ -8,13 +8,11 @@ package sqlitersync
 import (
 	"bytes"
 	"database/sql"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/caasmo/go-sqlite-rsync/hash"
-	"github.com/caasmo/go-sqlite-rsync/wire"
 )
 
 // dbPageInfo opens a database file and returns its page size and page
@@ -166,62 +164,6 @@ func copyFile(t *testing.T, src, dst string) {
 	}
 }
 
-// pipeConn wraps the reader and writer ends of a role's connection and
-// counts the bytes read and written — the wire traffic of the role —
-// including the REPLICA_CONFIG/ORIGIN_DETAIL single-byte messages
-// that mark the agghash round. The differential harness passes the C
-// process's pipe ends; runSync passes the ends of the in-memory pipe.
-//
-// Every byte of the protocol crosses these two methods, exactly one
-// call per message piece: all wire primitives (WriteByte, WriteUint32,
-// WritePow2, WriteBytes, WriteMessage, and their read counterparts)
-// end in the connection's Write or Read. That is what makes the
-// counters exact: writes and reads are the raw byte counts of the
-// role's traffic, in and out, and agghashMessages counts the
-// REPLICA_CONFIG and ORIGIN_DETAIL messages the role wrote — the two
-// messages a sync uses to change the size of a hash range. Spotting
-// them is easy: every message starts by putting one byte into the
-// pipe that says which kind of message it is, so a single byte of
-// 0x67 or 0x47 can only be one of these two messages. The count lives
-// on the write side only, because a read can come back in pieces and
-// a stray byte could look like 0x67 or 0x47 by accident.
-type pipeConn struct {
-	read            io.Reader
-	write           io.Writer
-	writes          int64 // bytes the role wrote
-	reads           int64 // bytes the role read
-	agghashMessages int64 // REPLICA_CONFIG and ORIGIN_DETAIL messages written: they exist only in the agghash round
-}
-
-// Read reads from the wrapped reader, counting the bytes.
-func (c *pipeConn) Read(p []byte) (int, error) {
-	n, err := c.read.Read(p)
-	c.reads += int64(n)
-	return n, err
-}
-
-// Write writes to the wrapped writer, counting the bytes, and counts
-// a single-byte REPLICA_CONFIG or ORIGIN_DETAIL message as an agghash
-// message.
-func (c *pipeConn) Write(p []byte) (int, error) {
-	n, err := c.write.Write(p)
-	c.writes += int64(n)
-	if n == 1 && (p[0] == wire.ReplicaConfig || p[0] == wire.OriginDetail) {
-		c.agghashMessages++
-	}
-	return n, err
-}
-
-// traffic is the wire traffic of one Go run: the bytes the Go role
-// wrote and read through the pipe, and the number of REPLICA_CONFIG
-// and ORIGIN_DETAIL messages it wrote — the signature of the agghash
-// round.
-type traffic struct {
-	writes          int64
-	reads           int64
-	agghashMessages int64
-}
-
 // scenario is one differential input: a name, an optional forced
 // protocol version (0 = the latest, like Options.Protocol), and the
 // fixture paths of the origin and replica files the syncs run on.
@@ -338,15 +280,15 @@ func newReplicaProtocolIs1(t *testing.T, dir string) *scenario {
 }
 
 // result is what one Go run produced: the scenario it ran, the run's
-// outcome and the wire traffic. The assert methods of the sync and
-// differential suites live on it; each reads what it checks from the
-// run's fields, plus the parameters it takes.
+// outcome and its per-run statistics. The assert methods of the sync
+// and differential suites live on it; each reads what it checks from
+// the run's fields, plus the parameters it takes.
 type result struct {
 	t        *testing.T
 	scenario *scenario
 	goErr    error
 	stderr   string
-	traffic  traffic
+	stats    Stats
 }
 
 // replicaAgghash returns the whole-file agghash of a database file:

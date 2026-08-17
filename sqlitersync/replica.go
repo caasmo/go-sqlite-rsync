@@ -349,6 +349,9 @@ func replicaSide(s *rsync) (err error) {
 				// the mirror and records the reasoning in TODO.md.
 				page[18], page[19] = 2, 2
 			}
+			// C counts the received page here, before the insert
+			// (sqlite3_rsync.c L1952).
+			s.pageUpdates++
 			_, readErr = pIns.Exec(int64(pgno), page)
 			if readErr != nil {
 				return s.w.WriteError(wire.ReplicaError,

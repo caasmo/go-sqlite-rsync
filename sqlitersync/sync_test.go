@@ -85,8 +85,8 @@ func TestSyncReplicaIsTheSame(t *testing.T) {
 	// No content asserts here: this test proves the stronger claim
 	// that no page crossed the wire (13 bytes) and the file is
 	// untouched, byte for byte — agghash and integrity are implied.
-	if originResult.traffic.writes != 13 {
-		t.Fatalf("origin wrote %d bytes, want 13 (no pages)", originResult.traffic.writes)
+	if originResult.stats.BytesSent != 13 {
+		t.Fatalf("origin sent %d bytes, want 13 (no pages)", originResult.stats.BytesSent)
 	}
 	after, err := os.ReadFile(sc.replica)
 	if err != nil {
@@ -202,10 +202,10 @@ func TestSyncNonWalRejected(t *testing.T) {
 // in-memory pipe and returns both roles' results. Each side runs in
 // its own goroutine and blocks until the sync ends; the caller owns
 // the pipe, so each goroutine closes its end after its role returns,
-// which ends the other side's blocked read. The wire is measured on
-// both ends with pipeConn, so the results carry the run's traffic. A
-// scenario's forced protocol (protocol > 0) is applied onto the
-// options.
+// which ends the other side's blocked read. Each result carries the
+// run's Stats, so the tests read the wire traffic from the roles
+// themselves. A scenario's forced protocol (protocol > 0) is applied
+// onto the options.
 func runSync(t *testing.T, ctx context.Context, sc *scenario, opts *Options) (result, result) {
 	t.Helper()
 	if opts == nil {
@@ -217,21 +217,22 @@ func runSync(t *testing.T, ctx context.Context, sc *scenario, opts *Options) (re
 	}
 	opts = &optsCopy
 	originConn, replicaConn := net.Pipe()
-	originCounted := &pipeConn{read: originConn, write: originConn}
-	replicaCounted := &pipeConn{read: replicaConn, write: replicaConn}
-	errCh := make(chan error, 2)
+	// One channel per role: each result is received from its own
+	// channel, never by receive order — the two sides finish in
+	// whichever order the run dictates.
+	originCh := make(chan result, 1)
+	replicaCh := make(chan result, 1)
 	go func() {
-		errCh <- Origin(ctx, originCounted, sc.origin, opts)
+		stats, err := Origin(ctx, originConn, sc.origin, opts)
+		originCh <- result{t: t, scenario: sc, goErr: err, stats: stats}
 		_ = originConn.Close()
 	}()
 	go func() {
-		errCh <- Replica(ctx, replicaCounted, sc.replica, opts)
+		stats, err := Replica(ctx, replicaConn, sc.replica, opts)
+		replicaCh <- result{t: t, scenario: sc, goErr: err, stats: stats}
 		_ = replicaConn.Close()
 	}()
-	originErr := <-errCh
-	replicaErr := <-errCh
-	return result{t: t, scenario: sc, goErr: originErr, traffic: traffic{writes: originCounted.writes, reads: originCounted.reads, agghashMessages: originCounted.agghashMessages}},
-		result{t: t, scenario: sc, goErr: replicaErr, traffic: traffic{writes: replicaCounted.writes, reads: replicaCounted.reads, agghashMessages: replicaCounted.agghashMessages}}
+	return <-originCh, <-replicaCh
 }
 
 // assertError fails the test unless the run's Go role returned an

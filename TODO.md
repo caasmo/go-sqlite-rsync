@@ -65,7 +65,7 @@ Group 2 — SQL-helper error-path unit tests (`sqlitersync/sql.go`):
 
 # sqlitersync: a BenchmarkSync (origin and replica over io.Pipe, no network) would give a baseline for future optimization and a way to detect regressions; not required for step 6, worth noting for step 7
 
-The C program's `-v` summary reports bytes sent/received, bytes/sec and speedup (sqlite3_rsync.c L2392-2423); the port drops it (README "Porting notes": progress reporting). A simple `BenchmarkSync` over an in-memory pipe, reusing the step-6 `runSync` scaffolding, would provide a regression baseline.
+The C program's `-v` summary reports bytes sent/received, bytes/sec and speedup (sqlite3_rsync.c L2392-2423); each role now returns the raw counts in `Stats`, only the derived presentation (bytes/sec, speedup) stays with the caller. A simple `BenchmarkSync` over an in-memory pipe, reusing the step-6 `runSync` scaffolding, would provide a regression baseline.
 
 - `impl-port-step6-public-api.md` — step 6 scope: the public API plus functional tests only; no benchmark
 - `sqlitersync/sync_test.go` — where `BenchmarkSync` would live (the `runSync` scaffolding already exists)
@@ -78,15 +78,6 @@ Test helpers that are not shared across test files must live in the file that us
 
 - `sqlitersync/helpers_test.go` — the shared helpers (`createDB`, `assertSynced`, `assertIntegrity`, `xColumn`, `dbInfo`, ...); must not accumulate file-specific helpers
 - `sqlitersync/differential_test.go` — build-tagged (step 7); carries the differential-only helpers (`copyFile`, `rewriteRows`, `build*Pair`, `assertByteSynced`, `assertWalSynced`, `differentialScenario`) in the file itself
-
-# sqlitersync: add statistics like C CLI
-
-The C program's `-v` option prints a summary when a sync ends: bytes sent and received, transfer speed (bytes/sec) and speedup (sqlite3_rsync.c L2392-2423). The port has no such channel; each role returns only the run's error. Consider offering statistics in the library — a per-run summary as an extra return value or a callback.
-
-- `README.md` — "Porting notes": progress reporting deliberately not ported
-- `sqlitersync/sync.go` — `Origin`/`Replica` return only the run's error; the natural place to surface a summary
-- `wire/wire.go` — `Reader`/`Writer`, the counting points for bytes sent and received
-- `references/sqlite-src-3530400/tool/sqlite3_rsync.c` — L2392-2423, the C `-v` summary
 
 # sqlitersync: differentialScenario design is bad, assert function names are atrocious, one scenario has only one assert is bad, all is bad
 

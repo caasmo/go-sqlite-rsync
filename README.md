@@ -29,7 +29,7 @@ import "github.com/caasmo/go-sqlite-rsync/sqlitersync"
 
 origin, replica := net.Pipe() // any io.ReadWriter works
 go sqlitersync.Origin(ctx, origin, "origin.db", nil)
-err := sqlitersync.Replica(ctx, replica, "replica.db", nil)
+stats, err := sqlitersync.Replica(ctx, replica, "replica.db", nil)
 ```
 
 `Origin` runs on the side that owns the up-to-date database. It opens `originPath`, compares the hashes the replica sends against its own pages, and writes back only the pages that differ. `Replica` runs on the side being brought up to date. It opens `replicaPath`, sends the hashes of its pages, and applies the pages it receives in one transaction, ending as a consistent snapshot of the origin. Both take the same arguments: a `context.Context` (`nil` is fine — it is never cancelled), the `io.ReadWriter` connecting the two sides, the database path, and an `*Options` (`nil` selects the defaults — latest protocol version, WAL mode required). For a remote sync the two calls run on different machines and `rw` is the SSH channel instead of the pipe. The roles never close the stream; the caller does, and that also ends the other side's run.
@@ -40,7 +40,7 @@ This library ports the two protocol roles of the reference C program (`tool/sqli
 
 - **Starting the other side.** The C tool accepts filenames like `user@host:file`, launches the remote program itself over SSH (`popen2`, with the `-ssh`, `-port`, `-exe`, `-remote-debugfile`, `-logfile` and `-arg-escape-check` options) and connects the pair over pipes (L2042-2067, L2255-2383). The library takes a connected `io.ReadWriter` for each side — the caller decides the transport: a pipe, an SSH channel, anything readable and writable.
 - **Printing to a terminal.** When the C program runs a role in its own process — the local side of an SSH pair — errors and informational messages print to stderr instead of going over the wire. The library always speaks to a protocol peer: failures travel as `*_ERROR` messages and come back to the caller as Go errors.
-- **Reporting progress.** When a sync ends, the C program can print a summary of bytes sent and received, transfer speed and speedup (the `-v` option, L2392-2423). The library has no display channel: each role returns an error, and the caller decides what to report.
+- **Reporting progress.** When a sync ends, the C program can print a summary of bytes sent and received, transfer speed and speedup (the `-v` option, L2392-2423). The library has no display channel: each role returns the raw per-run summary (`Stats`) — bytes sent and received, message counts, and the origin's page count and size — and the caller decides what to report; transfer speed and speedup are computed from `Stats` and the elapsed time.
 
 Three further deviations:
 

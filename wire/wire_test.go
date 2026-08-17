@@ -375,6 +375,22 @@ func TestWriteMessageGolden(t *testing.T) {
 	}
 }
 
+// TestWriteMessageTypeByteUncounted pins the C mirror: the *_MSG and
+// *_ERROR type byte goes out without touching nOut (C's reportError
+// and infoMsg send it with putc, sqlite3_rsync.c L1083-1088,
+// L1112-1117), so WriteMessage counts only the length and the payload
+// (4 + n bytes).
+func TestWriteMessageTypeByteUncounted(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	if err := w.WriteMessage(OriginError, []byte("boom")); err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	if got := w.BytesWritten(); got != 8 { // 4 length bytes + 4 payload bytes
+		t.Fatalf("BytesWritten = %d, want 8 (type byte uncounted)", got)
+	}
+}
+
 // TestReadMessage checks the read side of the *_MSG / *_ERROR framing:
 // the length and the payload, with the message byte already consumed.
 func TestReadMessage(t *testing.T) {
