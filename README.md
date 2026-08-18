@@ -61,10 +61,10 @@ This library ports the two protocol roles of the reference C program (`tool/sqli
 
 Three further deviations:
 
-- **WAL mode is required by default** (changed, not dropped). The C binary syncs rollback-mode databases unless `--wal-only` is given (`bWalOnly = 0`); this library inverts that — a sync of non-WAL databases fails loudly unless `AllowNonWal` is set. This is the safe fail-closed default for a production sync library: with `AllowNonWal` true, a sync against a live non-WAL database blocks that database's writes and reads for the whole run, so that path must be an explicit opt-in.
+- **`walOnly` is the default** (changed, not dropped). The C binary syncs rollback-mode databases unless `--wal-only` is given (`bWalOnly = 0`); this library inverts that — a sync of non-WAL databases fails loudly unless `AllowNonWal` is set. This is the safe fail-closed default for a production sync library: with `AllowNonWal` true, a sync against a live non-WAL database blocks that database's writes and reads for the whole run, so that path must be an explicit opt-in.
 - **Context support.** `Origin` and `Replica` take a `context.Context` (the C program has none, L1363, L1756); cancellation is checked when a read refills the wire buffer or a write flushes, so a read or write already blocked when the context is cancelled ends only when that I/O completes or the stream closes.
 - **Error handling.** Each role returns Go errors and, like C, reports them to a remote peer with `*_ERROR` messages; a failed connection close at the end of a run is folded into the result, where C's `closeDb` ignores `sqlite3_close` failures (L1310-1319).
-- **Buffering.** The roles buffer the stream internally with bufio and flush at the C message boundaries; write errors surface at Flush time, or at the write that spills the buffer, where C's `fflush` result is unchecked; pass the raw stream.
+- **Error surfacing.** Write errors surface at Flush time, or at the write that spills the buffer; C's `fflush` is unchecked.
 
 ## Differential Test
 
