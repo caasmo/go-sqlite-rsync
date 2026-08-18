@@ -93,7 +93,8 @@ const (
 // (sqlite3_rsync.c L68).
 type Reader struct {
 	r         io.Reader
-	bytesRead uint64 // bytes received from the stream (C nIn)
+	bytesRead uint64  // bytes received from the stream (C nIn)
+	buf       [4]byte // framing scratch, avoids a heap allocation per call
 }
 
 // BytesRead returns the number of bytes read from the stream since
@@ -113,15 +114,14 @@ func NewReader(r io.Reader) *Reader {
 // message loops on it exactly like C's `(c = readByte(p))!=EOF`
 // (sqlite3_rsync.c L1420, L1774).
 func (r *Reader) ReadByte() (byte, error) {
-	var buf [1]byte
-	_, err := io.ReadFull(r.r, buf[:])
+	_, err := io.ReadFull(r.r, r.buf[:1])
 	if err != nil {
 		return 0, err
 	}
 	// C counts the byte only when fgetc did not return EOF
 	// (sqlite3_rsync.c L1012).
 	r.bytesRead++
-	return buf[0], nil
+	return r.buf[0], nil
 }
 
 // ReadUint32 reads a single big-endian 32-bit unsigned integer from
@@ -129,14 +129,13 @@ func (r *Reader) ReadByte() (byte, error) {
 // reports a failed read through logError and returns 1 as its error
 // status (0 on success).
 func (r *Reader) ReadUint32() (uint32, error) {
-	var buf [4]byte
-	_, err := io.ReadFull(r.r, buf[:])
+	_, err := io.ReadFull(r.r, r.buf[:])
 	if err != nil {
 		return 0, err
 	}
 	// C counts only a full read (sqlite3_rsync.c L978).
 	r.bytesRead += 4
-	return uint32(buf[0])<<24 | uint32(buf[1])<<16 | uint32(buf[2])<<8 | uint32(buf[3]), nil
+	return uint32(r.buf[0])<<24 | uint32(r.buf[1])<<16 | uint32(r.buf[2])<<8 | uint32(r.buf[3]), nil
 }
 
 // ReadPow2 reads a power-of-two page size encoded as a single byte —
@@ -180,7 +179,8 @@ func (r *Reader) ReadBytes(nByte int) ([]byte, error) {
 // (sqlite3_rsync.c L67).
 type Writer struct {
 	w            io.Writer
-	bytesWritten uint64 // bytes transmitted to the stream (C nOut)
+	bytesWritten uint64  // bytes transmitted to the stream (C nOut)
+	buf          [4]byte // framing scratch, avoids a heap allocation per call
 }
 
 // BytesWritten returns the number of bytes written to the stream since
@@ -199,7 +199,8 @@ func NewWriter(w io.Writer) *Writer {
 // result; the port returns the error. C counts the byte regardless of
 // the write's outcome (L1021), and the port mirrors that.
 func (w *Writer) WriteByte(b byte) error {
-	n, err := w.w.Write([]byte{b})
+	w.buf[0] = b
+	n, err := w.w.Write(w.buf[:1])
 	w.bytesWritten++
 	if err != nil {
 		return err
@@ -216,12 +217,11 @@ func (w *Writer) WriteByte(b byte) error {
 // WriteUint32 writes a single big-endian 32-bit unsigned integer to
 // the stream. Port of writeUint32 (sqlite3_rsync.c L989-1006).
 func (w *Writer) WriteUint32(x uint32) error {
-	var buf [4]byte
-	buf[0] = byte(x >> 24)
-	buf[1] = byte(x >> 16)
-	buf[2] = byte(x >> 8)
-	buf[3] = byte(x)
-	return w.WriteBytes(buf[:])
+	w.buf[0] = byte(x >> 24)
+	w.buf[1] = byte(x >> 16)
+	w.buf[2] = byte(x >> 8)
+	w.buf[3] = byte(x)
+	return w.WriteBytes(w.buf[:])
 }
 
 // WritePow2 writes a power-of-two value to the stream as a single byte
@@ -278,7 +278,8 @@ func (w *Writer) WriteBytes(p []byte) error {
 // infoMsg L1112-1117), so writing it through WriteByte — which counts
 // — would diverge from C by one byte per message.
 func (w *Writer) WriteMessage(msgByte byte, payload []byte) error {
-	n, err := w.w.Write([]byte{msgByte})
+	w.buf[0] = msgByte
+	n, err := w.w.Write(w.buf[:1])
 	if err != nil {
 		return err
 	}

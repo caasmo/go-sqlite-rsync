@@ -457,3 +457,31 @@ func TestWriteError(t *testing.T) {
 		t.Fatalf("payload = %q", got)
 	}
 }
+
+// TestFramingAllocs pins the zero-allocation property of the framing
+// primitives: ReadByte, ReadUint32, WriteByte, WriteUint32 and
+// WriteMessage run once per protocol message, and the scratch buffers
+// on Reader and Writer keep them allocation-free.
+func TestFramingAllocs(t *testing.T) {
+	var wbuf, rbuf bytes.Buffer
+	wbuf.Grow(1024)
+	rbuf.Write(bytes.Repeat([]byte{0x41}, 1024))
+	w := NewWriter(&wbuf)
+	r := NewReader(&rbuf)
+	payload := []byte("x")
+	cases := []struct {
+		name string
+		fn   func()
+	}{
+		{"ReadByte", func() { _, _ = r.ReadByte() }},
+		{"ReadUint32", func() { _, _ = r.ReadUint32() }},
+		{"WriteByte", func() { _ = w.WriteByte(0x41) }},
+		{"WriteUint32", func() { _ = w.WriteUint32(0x01020304) }},
+		{"WriteMessage", func() { _ = w.WriteMessage(0x46, payload) }},
+	}
+	for _, tc := range cases {
+		if n := testing.AllocsPerRun(100, tc.fn); n != 0 {
+			t.Fatalf("%s allocs = %f, want 0", tc.name, n)
+		}
+	}
+}
