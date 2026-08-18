@@ -212,8 +212,8 @@ func TestSyncFlushPointsComplete(t *testing.T) {
 	defer cancel()
 	originConn, replicaConn := net.Pipe()
 	context.AfterFunc(ctx, func() {
-		originConn.Close()
-		replicaConn.Close()
+		_ = originConn.Close()
+		_ = replicaConn.Close()
 	})
 	originCh := make(chan result, 1)
 	replicaCh := make(chan result, 1)
