@@ -392,8 +392,15 @@ func (r *Reader) ReadMessage() ([]byte, error) {
 // role's error message: REPLICA_ERROR on the replica side, ORIGIN_ERROR
 // on the origin side. The C error counter (nErr) becomes the returned
 // error, joined with any error from writing the frame.
+//
+// The message is formatted with fmt.Errorf, so a %w verb renders as
+// the wrapped error's message text, like %v. The wire carries text,
+// not error chains: the frame holds no wrap information, and the
+// returned error is the message as a plain error, without an Unwrap
+// chain. C's sqlite3_vmprintf knows no error-wrapping verb either
+// (its %w doubles double quotes, printf.c L34).
 func (w *Writer) WriteError(msgByte byte, format string, args ...any) error {
-	msg := fmt.Sprintf(format, args...)
+	msg := fmt.Errorf(format, args...).Error()
 	sendErr := w.WriteMessage(msgByte, []byte(msg))
 	return errors.Join(errors.New(msg), sendErr)
 }

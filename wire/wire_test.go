@@ -510,6 +510,41 @@ func TestWriteError(t *testing.T) {
 	}
 }
 
+// TestWriteErrorPercentW pins the %w rendering: the message is
+// formatted with fmt.Errorf, so %w prints the wrapped error's message
+// text (like %v) — never the %!w(...) garbage fmt.Sprintf would
+// produce. The wrap chain itself does not survive: the frame and the
+// returned error carry the text only.
+func TestWriteErrorPercentW(t *testing.T) {
+	var buf bytes.Buffer
+	cause := errors.New("page 42 unreadable")
+	err := NewWriter(&buf).WriteError(ReplicaError, "read page: %w", cause)
+	if err == nil {
+		t.Fatal("WriteError returned nil")
+	}
+	if strings.Contains(err.Error(), "%!w") {
+		t.Fatalf("error = %q, want no percent-w garbling", err)
+	}
+	if !strings.Contains(err.Error(), "read page: page 42 unreadable") {
+		t.Fatalf("error = %q, want the wrapped message text", err)
+	}
+	r := NewReader(&buf)
+	b, err := r.ReadByte()
+	if err != nil {
+		t.Fatalf("ReadByte: %v", err)
+	}
+	if b != ReplicaError {
+		t.Fatalf("message = %#x, want ReplicaError", b)
+	}
+	got, err := r.ReadMessage()
+	if err != nil {
+		t.Fatalf("ReadMessage: %v", err)
+	}
+	if string(got) != "read page: page 42 unreadable" {
+		t.Fatalf("payload = %q", got)
+	}
+}
+
 // TestWriterFlush checks that writes stay in the writer's buffer
 // until Flush pushes them to the underlying stream.
 func TestWriterFlush(t *testing.T) {
