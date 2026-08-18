@@ -16,20 +16,6 @@ The engine API (`HashContext`, `HashInit`, `HashUpdate`, `HashFinal`) is exporte
 
 Decision (2026-08-12): keep exported. The sqlitersync tests also call the engine directly (`originPageHash` in `origin_test.go`, `hashOfConcat` in `subdivide_test.go`) to compute the wire hashes that drive scripted syncs; unexporting would break them.
 
-# wire: ReadBytes negative-length panic and unbounded allocation (for consideration only)
-
-`wire.ReadBytes(nByte int)` (planned, impl-port-step3-wire.md Phase 1) allocates its result with `make([]byte, nByte)`, so a negative `nByte` panics the process. The C source never crashes here: `readBytes` (sqlite3_rsync.c L1048-1054) fills a caller-supplied buffer with `fread`, and a negative count is just a huge size_t that fails and gets logged. A peer-controlled length read as `uint32` (message lengths, steps 4-5) could also be huge — up to ~4 GB — so `ReadBytes` would attempt a multi-GB allocation.
-
-The port intentionally follows the C source instead of adding a Go-only guard: the negative case is unreachable through the protocol on 64-bit (`uint32`→`int` never wraps negative), and C has the same unbounded-allocation exposure (it would attempt the read and fail). A guard would break the 1:1 C mirroring (A23) without fixing anything the protocol can actually hit. The real mitigation belongs in the roles (steps 4-5), which must cap message lengths before calling `ReadBytes`.
-
-Recorded here for consideration only, not as a planned change.
-
-Related allocation note (steps 4-5, out of scope for step 3): `ReadBytes` returns a fresh slice per call, unlike C's caller-supplied buffer. The replica's ORIGIN_PAGE loop allocates one page-sized buffer per page; if a large sync shows GC pressure, the roles should add a buffer-reuse variant in their paging loops.
-
-- `wire/wire.go` — `ReadBytes` (to be created by impl-port-step3-wire.md)
-- `impl-port-step3-wire.md` — step 4-5 roles must cap lengths before calling `ReadBytes`; also: per-page `ReadBytes` allocation in the paging loops, buffer-reuse variant if pressure shows
-- A `nByte < 0` guard becomes a fidelity requirement only if 32-bit targets ever matter (`uint32`→`int` wraps negative there)
-
 # sqlitesync: unguarded `page[18]` index in the ORIGIN_PAGE WAL-fix (documented; decision taken)
 
 The replica's ORIGIN_PAGE handler fixes page 1's write-version bytes with `page[18], page[19] = 2, 2` when the origin sent rollback-mode content (sqlite3_rsync.c L1947-1951, ported in impl-port-step4-replica.md Phase 4). `page` comes from `ReadBytes(s.pageSize)`, and `s.pageSize` is peer-declared (`ReadPow2` accepts 1..65536), so a declared page size below 19 bytes would panic the index — ugly, but unreachable through the protocol: ORIGIN_PAGE can only arrive after ORIGIN_BEGIN's page-size check (`szRPage != s.pageSize`) passed, and the replica's own page size is at least 512 for a real file and at least 256 for the empty-replica init, so `page` always holds a full page. C reads uninitialized stack bytes in that situation (silent UB), which is worse.

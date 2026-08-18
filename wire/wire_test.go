@@ -249,6 +249,18 @@ func TestReadBytesEmpty(t *testing.T) {
 	}
 }
 
+// TestReadBytesNegative checks the negative guard: make would panic on
+// a negative length, so ReadBytes returns an error instead — C's fread
+// on a negative count fails and gets logged (sqlite3_rsync.c
+// L1048-1054). Unreachable through the protocol (every in-repo length
+// is positive and bounded); the test pins the exported-method
+// behavior.
+func TestReadBytesNegative(t *testing.T) {
+	if _, err := NewReader(bytes.NewReader(nil)).ReadBytes(-1); err == nil {
+		t.Fatal("ReadBytes(-1) succeeded, want it to fail")
+	}
+}
+
 // cappedWriter writes at most cap bytes per call, so a larger payload
 // produces the short write that bytes.Buffer can never produce.
 type cappedWriter struct {

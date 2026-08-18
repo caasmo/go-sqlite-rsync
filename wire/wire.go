@@ -55,8 +55,13 @@
 //     byte anyway.
 //   - ReadMessage: caps the announced payload at 1 MiB. C allocates
 //     whatever length the peer announces (L1140-1146); the cap keeps a
-//     broken or hostile peer from forcing a multi-GB allocation
-//     (TODO.md). Real messages are short; the cap is generous.
+//     broken or hostile peer from forcing a multi-GB allocation. Real
+//     messages are short; the cap is generous.
+//   - ReadBytes: rejects a negative byte count. C's fread on a
+//     negative count becomes a huge size_t that fails and gets logged
+//     (L1048-1054); make would panic, so the port returns an error.
+//     Unobservable in the protocol: every in-repo length is positive
+//     and bounded (see the ReadBytes comment).
 //   - Write errors surface at Flush time, or at the write that
 //     spills the buffer: the port returns them. C's fflush is
 //     unchecked; its nWrErr bumps inside writeUint32/writeBytes on
@@ -190,7 +195,17 @@ func (r *Reader) ReadPow2() (int, error) {
 // buffer and merely logs a short read, silently leaving partial data;
 // the port uses io.ReadFull and returns io.EOF or io.ErrUnexpectedEOF
 // instead.
+//
+// A negative nByte is rejected before any read: make would panic on
+// it, where C's fread on a negative count becomes a huge size_t that
+// fails and gets logged (L1048-1054). Unobservable in the protocol —
+// every in-repo length is positive and bounded (the message cap in
+// ReadMessage, page sizes from ReadPow2) — the guard protects direct
+// callers of the exported method.
 func (r *Reader) ReadBytes(nByte int) ([]byte, error) {
+	if nByte < 0 {
+		return nil, fmt.Errorf("wire: negative byte count %d", nByte)
+	}
 	buf := make([]byte, nByte)
 	_, err := io.ReadFull(r.r, buf)
 	if err != nil {
