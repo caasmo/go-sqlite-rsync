@@ -73,7 +73,12 @@ func originSide(s *rsync) (err error) {
 		if err != nil {
 			return err
 		}
-		return s.w.WriteByte(wire.OriginEnd)
+		err = s.w.WriteByte(wire.OriginEnd)
+		if err != nil {
+			return err
+		}
+		// C flushes the commcheck ORIGIN_END (sqlite3_rsync.c L1382).
+		return s.w.Flush()
 	}
 	// C's main defaults the protocol (L2089); the library roles carry
 	// the guard C's replicaSide has (L1769).
@@ -138,6 +143,12 @@ func originSide(s *rsync) (err error) {
 		return err
 	}
 	err = s.w.WriteUint32(s.pageCount)
+	if err != nil {
+		return err
+	}
+	// C flushes the ORIGIN_BEGIN message before reading the replica's
+	// reply (sqlite3_rsync.c L1409).
+	err = s.w.Flush()
 	if err != nil {
 		return err
 	}
@@ -206,6 +217,12 @@ func originSide(s *rsync) (err error) {
 					return readErr
 				}
 				readErr = s.w.WriteUint32(s.pageCount)
+				if readErr != nil {
+					return readErr
+				}
+				// C flushes the re-sent ORIGIN_BEGIN before reading
+				// the replica's reply (sqlite3_rsync.c L1437).
+				readErr = s.w.Flush()
 				if readErr != nil {
 					return readErr
 				}
@@ -436,6 +453,13 @@ func originSide(s *rsync) (err error) {
 				}
 				// C keeps reading after ORIGIN_END until REPLICA_END or
 				// EOF (loop condition L1420).
+			}
+			// C flushes the round's messages once — ORIGIN_DETAIL/
+			// ORIGIN_READY or the page stream through ORIGIN_END —
+			// before the loop continues (sqlite3_rsync.c L1594).
+			readErr = s.w.Flush()
+			if readErr != nil {
+				return readErr
 			}
 		default:
 			return s.w.WriteError(s.errMsgByte(), "Unknown message 0x%02x", c)

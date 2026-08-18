@@ -134,3 +134,13 @@ A throwaway comparison (Go vs Go over net.Pipe against C vs C on the same replic
 - `sqlitersync/sync_test.go` — `runSync` (Go vs Go over net.Pipe), the Go-side counterpart of `syncCToC`
 - `references/sqlite-src-3530400/tool/sqlite3_rsync.c` — the C counterpart; `-v` summary (L2392-2423) reports its own bytes/sec
 
+# perf: perform escape analisys on each file
+
+Run `go build -gcflags="-m" ./...` and review the per-call heap allocations file by file, as done for the wire framing primitives (commit 1850de0): the wire scratch-buffer fix eliminated the five framing escapes, and `io.ReadFull` inlining now folds away in `ReadByte`/`ReadUint32`.
+
+- `wire/wire.go` — done: the five framing escapes eliminated; remaining: `ReadBytes` result (by design) and the one-time `&Reader{}`/`&Writer{}` constructions
+- `hash/hash.go`, `hash/sql.go` — the hash engine and its SQL wrappers
+- `sqlitersync/origin.go`, `sqlitersync/replica.go`, `sqlitersync/sync.go`, `sqlitersync/sql.go` — the roles, the sync loop and the SQL helpers
+
+
+# perf: bufio

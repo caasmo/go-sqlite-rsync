@@ -50,8 +50,14 @@ func TestMessageConstants(t *testing.T) {
 // -> 01 02 03 04).
 func TestWriteUint32Golden(t *testing.T) {
 	var buf bytes.Buffer
-	if err := NewWriter(&buf).WriteUint32(0x01020304); err != nil {
+	w := NewWriter(&buf)
+	err := w.WriteUint32(0x01020304)
+	if err != nil {
 		t.Fatalf("WriteUint32: %v", err)
+	}
+	err = w.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 	want := []byte{0x01, 0x02, 0x03, 0x04}
 	if !bytes.Equal(buf.Bytes(), want) {
@@ -75,8 +81,14 @@ func TestWritePow2Golden(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(fmt.Sprintf("size%d", tc.size), func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := NewWriter(&buf).WritePow2(tc.size); err != nil {
+			w := NewWriter(&buf)
+			err := w.WritePow2(tc.size)
+			if err != nil {
 				t.Fatalf("WritePow2(%d): %v", tc.size, err)
+			}
+			err = w.Flush()
+			if err != nil {
+				t.Fatalf("Flush: %v", err)
 			}
 			if got := buf.Bytes()[0]; got != tc.want {
 				t.Fatalf("WritePow2(%d) = %#x, want %#x", tc.size, got, tc.want)
@@ -131,8 +143,14 @@ func TestWritePow2TooLarge(t *testing.T) {
 // L1037-1044).
 func TestWritePow2Zero(t *testing.T) {
 	var buf bytes.Buffer
-	if err := NewWriter(&buf).WritePow2(0); err != nil {
+	w := NewWriter(&buf)
+	err := w.WritePow2(0)
+	if err != nil {
 		t.Fatalf("WritePow2(0): %v", err)
+	}
+	err = w.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 	got, err := NewReader(bytes.NewReader(buf.Bytes())).ReadPow2()
 	if err != nil {
@@ -246,16 +264,24 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	return w.buf.Write(p)
 }
 
-// TestWriteBytesShortWrite checks the documented short-write contract:
-// a writer that accepts fewer bytes than offered yields
-// io.ErrShortWrite, and the accepted bytes are the ones on the wire.
+// TestWriteBytesShortWrite checks the documented short-write
+// contract: a writer that accepts fewer bytes than offered yields
+// io.ErrShortWrite at Flush time, when the buffered bytes go out —
+// where C's write primitives bump nWrErr on a failed fwrite
+// (sqlite3_rsync.c L1001, L1064). The accepted bytes are the ones
+// on the wire.
 func TestWriteBytesShortWrite(t *testing.T) {
-	w := &cappedWriter{cap: 2}
-	err := NewWriter(w).WriteBytes([]byte{0x01, 0x02, 0x03, 0x04})
-	if err != io.ErrShortWrite {
-		t.Fatalf("WriteBytes = %v, want io.ErrShortWrite", err)
+	under := &cappedWriter{cap: 2}
+	w := NewWriter(under)
+	err := w.WriteBytes([]byte{0x01, 0x02, 0x03, 0x04})
+	if err != nil {
+		t.Fatalf("WriteBytes: %v", err)
 	}
-	if got := w.buf.Bytes(); !bytes.Equal(got, []byte{0x01, 0x02}) {
+	err = w.Flush()
+	if err != io.ErrShortWrite {
+		t.Fatalf("Flush = %v, want io.ErrShortWrite", err)
+	}
+	if got := under.buf.Bytes(); !bytes.Equal(got, []byte{0x01, 0x02}) {
 		t.Fatalf("bytes on the wire = %x, want %x", got, []byte{0x01, 0x02})
 	}
 }
@@ -272,12 +298,18 @@ func (w *failingWriter) Write(p []byte) (int, error) {
 }
 
 // TestWriteBytesError checks that an error from the underlying writer
-// is returned unchanged, not wrapped or swallowed.
+// is returned unchanged, not wrapped or swallowed — at Flush time,
+// when the buffered bytes go out.
 func TestWriteBytesError(t *testing.T) {
 	errSentinel := errors.New("wire: test write failure")
-	err := NewWriter(&failingWriter{err: errSentinel}).WriteBytes([]byte{0x01, 0x02})
+	w := NewWriter(&failingWriter{err: errSentinel})
+	err := w.WriteBytes([]byte{0x01, 0x02})
+	if err != nil {
+		t.Fatalf("WriteBytes: %v", err)
+	}
+	err = w.Flush()
 	if err != errSentinel {
-		t.Fatalf("WriteBytes = %v, want %v", err, errSentinel)
+		t.Fatalf("Flush = %v, want %v", err, errSentinel)
 	}
 }
 
@@ -309,6 +341,9 @@ func TestRoundTrip(t *testing.T) {
 	hash := bytes.Repeat([]byte{0xAB}, 20)
 	if err := w.WriteBytes(hash); err != nil {
 		t.Fatalf("WriteBytes: %v", err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 
 	r := NewReader(&buf)
@@ -420,9 +455,14 @@ func TestReadMessage(t *testing.T) {
 // above maxMessageLen fails the read instead of allocating it.
 func TestReadMessageTooLong(t *testing.T) {
 	var buf bytes.Buffer
-	err := NewWriter(&buf).WriteUint32(maxMessageLen + 1)
+	w := NewWriter(&buf)
+	err := w.WriteUint32(maxMessageLen + 1)
 	if err != nil {
 		t.Fatalf("WriteUint32: %v", err)
+	}
+	err = w.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
 	}
 	_, err = NewReader(&buf).ReadMessage()
 	if err == nil {
@@ -455,6 +495,71 @@ func TestWriteError(t *testing.T) {
 	}
 	if string(got) != "page size mismatch; origin is 4096 bytes" {
 		t.Fatalf("payload = %q", got)
+	}
+}
+
+// TestWriterFlush checks that writes stay in the writer's buffer
+// until Flush pushes them to the underlying stream.
+func TestWriterFlush(t *testing.T) {
+	var buf bytes.Buffer
+	w := NewWriter(&buf)
+	err := w.WriteByte(OriginBegin)
+	if err != nil {
+		t.Fatalf("WriteByte: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatal("bytes reached the stream before the flush")
+	}
+	err = w.Flush()
+	if err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if !bytes.Equal(buf.Bytes(), []byte{OriginBegin}) {
+		t.Fatalf("stream = %x, want %x", buf.Bytes(), []byte{OriginBegin})
+	}
+}
+
+// TestWriteMessageFlush checks that WriteMessage flushes the frame,
+// like C's reportError and infoMsg (sqlite3_rsync.c L1089, L1118):
+// the frame is in the underlying stream when WriteMessage returns;
+// without the flush, buf.Bytes() would stay empty.
+func TestWriteMessageFlush(t *testing.T) {
+	var buf bytes.Buffer
+	err := NewWriter(&buf).WriteMessage(ReplicaMsg, []byte("abc"))
+	if err != nil {
+		t.Fatalf("WriteMessage: %v", err)
+	}
+	want := []byte{ReplicaMsg, 0x00, 0x00, 0x00, 0x03, 'a', 'b', 'c'}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Fatalf("frame = %x, want %x", buf.Bytes(), want)
+	}
+}
+
+// countingReader wraps a reader and counts the underlying Read calls.
+type countingReader struct {
+	r     io.Reader
+	calls int
+}
+
+// Read implements io.Reader.
+func (r *countingReader) Read(p []byte) (int, error) {
+	r.calls++
+	return r.r.Read(p)
+}
+
+// TestReaderBuffered checks that the reader serves many framing reads
+// from one underlying fill: 100 ReadByte calls make one underlying
+// Read — the bufio.Reader mirror of C's stdio pIn.
+func TestReaderBuffered(t *testing.T) {
+	under := &countingReader{r: bytes.NewReader(bytes.Repeat([]byte{0x41}, 100))}
+	r := NewReader(under)
+	for i := 0; i < 100; i++ {
+		if _, err := r.ReadByte(); err != nil {
+			t.Fatalf("ReadByte: %v", err)
+		}
+	}
+	if under.calls != 1 {
+		t.Fatalf("underlying reads = %d, want 1", under.calls)
 	}
 }
 

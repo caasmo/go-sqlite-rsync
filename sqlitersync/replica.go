@@ -40,7 +40,12 @@ func replicaSide(s *rsync) (err error) {
 		if err != nil {
 			return err
 		}
-		return s.w.WriteByte(wire.ReplicaEnd)
+		err = s.w.WriteByte(wire.ReplicaEnd)
+		if err != nil {
+			return err
+		}
+		// C flushes the commcheck REPLICA_END (sqlite3_rsync.c L1767).
+		return s.w.Flush()
 	}
 	if s.protocol <= 0 {
 		s.protocol = wire.ProtocolVersion
@@ -119,6 +124,12 @@ func replicaSide(s *rsync) (err error) {
 					return readErr
 				}
 				readErr = s.w.WriteByte(byte(s.protocol))
+				if readErr != nil {
+					return readErr
+				}
+				// C flushes the REPLICA_BEGIN reply before reading
+				// the origin's resend (sqlite3_rsync.c L1805).
+				readErr = s.w.Flush()
 				if readErr != nil {
 					return readErr
 				}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caasmo/go-sqlite-rsync/wire"
 )
@@ -196,6 +197,42 @@ func TestSyncNonWalRejected(t *testing.T) {
 	originResult.assertErrorContains("not in WAL mode")
 	replicaResult.assertError()
 	replicaResult.assertErrorContains("not in WAL mode")
+}
+
+// TestSyncFlushPointsComplete runs a full sync over the library's
+// internal buffering, the default path every caller takes: a missing
+// flush point strands writes in the buffer, and both sides block
+// inside their reads — where ctx cannot reach them, as it is checked
+// before an I/O call, not during one. The AfterFunc closes the pipes
+// at the deadline, unblocking the reads with io.ErrClosedPipe, so
+// the regression fails fast instead of hanging.
+func TestSyncFlushPointsComplete(t *testing.T) {
+	sc := newReplicaIsTheSame(t, t.TempDir())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	originConn, replicaConn := net.Pipe()
+	context.AfterFunc(ctx, func() {
+		originConn.Close()
+		replicaConn.Close()
+	})
+	originCh := make(chan result, 1)
+	replicaCh := make(chan result, 1)
+	go func() {
+		stats, err := Origin(ctx, originConn, sc.origin, &Options{AllowNonWal: true})
+		originCh <- result{t: t, scenario: sc, goErr: err, stats: stats}
+		_ = originConn.Close()
+	}()
+	go func() {
+		stats, err := Replica(ctx, replicaConn, sc.replica, &Options{AllowNonWal: true})
+		replicaCh <- result{t: t, scenario: sc, goErr: err, stats: stats}
+		_ = replicaConn.Close()
+	}()
+	originResult := <-originCh
+	replicaResult := <-replicaCh
+	originResult.assertSucceeded()
+	replicaResult.assertSucceeded()
+	replicaResult.assertReplicaAgghashSame()
+	replicaResult.assertIntegrity()
 }
 
 // runSync runs a full origin↔replica sync of the scenario over an

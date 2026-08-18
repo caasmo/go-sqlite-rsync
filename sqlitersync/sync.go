@@ -84,12 +84,20 @@ type Stats struct {
 // the caller closes the stream, so the other side's blocked read
 // fails and its run ends too.
 //
-// ctx cancels the run: both sides check it before every message read
-// and write, so a side that is between messages ends at the next one
-// with context.Canceled — a side already blocked inside a read or
-// write notices only when that I/O completes or the stream closes.
-// A nil ctx is never cancelled. The C program has no context; this is
-// the one Go-native addition.
+// The stream is buffered internally: the roles read and write
+// through bufio streams mirroring C's stdio pIn/pOut
+// (sqlite3_rsync.c L316, L318), flushing at the C message
+// boundaries (see wire.Writer.Flush). Pass the raw stream — a
+// caller-side buffered writer would hold the roles' flushes in its
+// own buffer, and a caller-side buffered reader used before the run
+// would strand the prefetched sync bytes.
+//
+// ctx cancels the run: both sides check it when a read refills the
+// wire buffer or a write flushes, so a side between messages ends
+// within one 4 KiB buffer of messages. A side already blocked inside
+// a read or write notices only when that I/O completes or the stream
+// closes. A nil ctx is never cancelled; the C program has no
+// context — the one Go-native addition.
 func Origin(ctx context.Context, rw io.ReadWriter, originPath string, opts *Options) (Stats, error) {
 	s := newRsync(ctx, rw, opts)
 	s.originPath = originPath
@@ -104,9 +112,22 @@ func Origin(ctx context.Context, rw io.ReadWriter, originPath string, opts *Opti
 // returns the run's per-run summary (Stats) and the run's error, if
 // any — the summary is also returned when the run fails, holding the
 // partial counts. The caller owns rw and closes it
-// when the run ends; ctx cancels the run like Origin (nil is never
-// cancelled) — the context is checked between messages, so a blocked
-// read or write is not interrupted.
+// when the run ends.
+//
+// The stream is buffered internally: the roles read and write
+// through bufio streams mirroring C's stdio pIn/pOut
+// (sqlite3_rsync.c L316, L318), flushing at the C message
+// boundaries (see wire.Writer.Flush). Pass the raw stream — a
+// caller-side buffered writer would hold the roles' flushes in its
+// own buffer, and a caller-side buffered reader used before the run
+// would strand the prefetched sync bytes.
+//
+// ctx cancels the run: both sides check it when a read refills the
+// wire buffer or a write flushes, so a side between messages ends
+// within one 4 KiB buffer of messages. A side already blocked inside
+// a read or write notices only when that I/O completes or the stream
+// closes. A nil ctx is never cancelled; the C program has no
+// context — the one Go-native addition.
 func Replica(ctx context.Context, rw io.ReadWriter, replicaPath string, opts *Options) (Stats, error) {
 	s := newRsync(ctx, rw, opts)
 	s.replicaPath = replicaPath
@@ -162,15 +183,15 @@ func newRsync(ctx context.Context, rw io.ReadWriter, opts *Options) *rsync {
 	}
 }
 
-// ctxStream wraps a stream and checks ctx before every message read
-// and write, so a cancelled context ends the run at the next protocol
-// message — the run's message loop reads one message at a time (see
-// Origin and Replica). If a read or write is already in progress when
-// ctx is cancelled, the run ends when that I/O completes or the peer
-// closes the stream: interrupting a blocked call would require
-// deadlines, which io.ReadWriter does not guarantee. The write check
-// matters too: without it, a side whose context is cancelled could
-// still block forever writing a message the other side never reads.
+// ctxStream wraps a stream and checks ctx on the underlying reads
+// and writes — a buffer refill, a spill, or a Flush — so a cancelled
+// context ends the run at the next I/O (see Origin and Replica). If a
+// read or write is already in progress when ctx is cancelled, the run
+// ends when that I/O completes or the peer closes the stream:
+// interrupting a blocked call would require deadlines, which
+// io.ReadWriter does not guarantee. The write check matters too:
+// without it, a side whose context is cancelled could still block
+// forever writing a message the other side never reads.
 type ctxStream struct {
 	ctx context.Context
 	rw  io.ReadWriter

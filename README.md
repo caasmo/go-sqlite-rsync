@@ -34,7 +34,7 @@ go sqlitersync.Origin(ctx, origin, "origin.db", nil)
 stats, err := sqlitersync.Replica(ctx, replica, "replica.db", nil)
 ```
 
-`Origin` runs on the side that owns the up-to-date database. It opens `originPath`, compares the hashes the replica sends against its own pages, and writes back only the pages that differ. `Replica` runs on the side being brought up to date. It opens `replicaPath`, sends the hashes of its pages, and applies the pages it receives in one transaction, ending as a consistent snapshot of the origin. Both take the same arguments: a `context.Context` (`nil` is fine — it is never cancelled), the `io.ReadWriter` connecting the two sides, the database path, and an `*Options` (`nil` selects the defaults — latest protocol version, WAL mode required). For a remote sync the two calls run on different machines and `rw` is the SSH channel instead of the pipe. The roles never close the stream; the caller does, and that also ends the other side's run.
+`Origin` runs on the side that owns the up-to-date database. It opens `originPath`, compares the hashes the replica sends against its own pages, and writes back only the pages that differ. `Replica` runs on the side being brought up to date. It opens `replicaPath`, sends the hashes of its pages, and applies the pages it receives in one transaction, ending as a consistent snapshot of the origin. Both take the same arguments: a `context.Context` (`nil` is fine — it is never cancelled), the `io.ReadWriter` connecting the two sides, the database path, and an `*Options` (`nil` selects the defaults — latest protocol version, WAL mode required). For a remote sync the two calls run on different machines and `rw` is the SSH channel instead of the pipe. The roles never close the stream; the caller does, and that also ends the other side's run. Pass the raw stream — the library buffers it internally, and a caller-side `bufio` wrapper would hold the flushes in its own buffer or strand prefetched bytes.
 
 ## Examples
 
@@ -62,8 +62,9 @@ This library ports the two protocol roles of the reference C program (`tool/sqli
 Three further deviations:
 
 - **WAL mode is required by default** (changed, not dropped). The C binary syncs rollback-mode databases unless `--wal-only` is given (`bWalOnly = 0`); this library inverts that — a sync of non-WAL databases fails loudly unless `AllowNonWal` is set. This is the safe fail-closed default for a production sync library: with `AllowNonWal` true, a sync against a live non-WAL database blocks that database's writes and reads for the whole run, so that path must be an explicit opt-in.
-- **Context support.** `Origin` and `Replica` take a `context.Context` (the C program has none, L1363, L1756); cancellation is checked between protocol messages, so a read or write already blocked when the context is cancelled ends only when that I/O completes or the stream closes.
+- **Context support.** `Origin` and `Replica` take a `context.Context` (the C program has none, L1363, L1756); cancellation is checked when a read refills the wire buffer or a write flushes, so a read or write already blocked when the context is cancelled ends only when that I/O completes or the stream closes.
 - **Error handling.** Each role returns Go errors and, like C, reports them to a remote peer with `*_ERROR` messages; a failed connection close at the end of a run is folded into the result, where C's `closeDb` ignores `sqlite3_close` failures (L1310-1319).
+- **Buffering.** The roles buffer the stream internally with bufio and flush at the C message boundaries; write errors surface at Flush time, or at the write that spills the buffer, where C's `fflush` result is unchecked; pass the raw stream.
 
 ## Differential Test
 

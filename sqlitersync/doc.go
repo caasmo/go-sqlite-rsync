@@ -59,10 +59,16 @@
 //     porting notes).
 //   - Context: Origin and Replica take a context.Context, the one
 //     Go-native addition (the C program has none, sqlite3_rsync.c
-//     L1363, L1756). Cancellation is checked between protocol
-//     messages: a read or write already blocked when the context is
-//     cancelled ends only when that I/O completes or the stream
-//     closes.
+//     L1363, L1756). Cancellation is checked when a read refills
+//     the wire buffer or a write flushes: a read or write already
+//     blocked when the context is cancelled ends only when that I/O
+//     completes or the stream closes.
+//   - Buffering: the roles read and write through bufio streams
+//     mirroring C's stdio pIn/pOut (sqlite3_rsync.c L316, L318),
+//     flushing at the C fflush points (see wire.Writer.Flush); write
+//     errors surface at Flush time, or at the write that spills the
+//     buffer — C's fflush is unchecked (its nWrErr bumps inside the
+//     fwrite primitives, L1001, L1064); callers pass the raw stream.
 //   - Errors: the C program reports failures to the peer with *_ERROR
 //     messages and keeps a global error counter; the port returns Go
 //     errors from each role and, like C, reports them to a remote peer

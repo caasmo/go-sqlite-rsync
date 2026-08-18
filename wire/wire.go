@@ -32,6 +32,21 @@
 // and replica roles (package sqlitersync) decide which messages to send
 // and what to do with them.
 //
+// The framing streams buffer like C's stdio: Reader wraps its stream
+// in a bufio.Reader and Writer in a bufio.Writer, mirroring the
+// fdopen'd pIn/pOut (sqlite3_rsync.c L316, L318). Write errors
+// surface at Flush time, or at the write that spills the buffer —
+// a deviation, see the list below.
+//
+// The flush discipline mirrors C too: the roles flush only before
+// blocking on the peer's answer (sqlite3_rsync.c L1089, L1118,
+// L1382, L1409, L1437, L1594, L1672, L1767, L1805), packing many
+// messages into one write; the peer never waits on buffered bytes.
+//
+// Pass the stream unwrapped: a caller-side buffered writer would
+// hold the flushes in its own buffer, and a caller-side buffered
+// reader used before the run would strand the prefetched bytes.
+//
 // # Deviations from the C source
 //
 //   - WritePow2: rejects invalid page sizes before writing — not a
@@ -42,6 +57,13 @@
 //     whatever length the peer announces (L1140-1146); the cap keeps a
 //     broken or hostile peer from forcing a multi-GB allocation
 //     (TODO.md). Real messages are short; the cap is generous.
+//   - Write errors surface at Flush time, or at the write that
+//     spills the buffer: the port returns them. C's fflush is
+//     unchecked; its nWrErr bumps inside writeUint32/writeBytes on
+//     a failed fwrite (sqlite3_rsync.c L1001, L1064). WriteMessage
+//     is the exception: a failed write returns with the frame
+//     unflushed, where C's reportError/infoMsg still flush
+//     (L1088-1089).
 //
 // Everything here is a faithful port of the reference C program
 // (tool/sqlite3_rsync.c, lines 79-103 and 971-1066), so a Go program
@@ -49,6 +71,7 @@
 package wire
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -91,21 +114,27 @@ const (
 // failures through logError and the nErr counter; the port returns
 // Go errors. The byte counter mirrors the C nIn counter
 // (sqlite3_rsync.c L68).
+//
+// The stream is wrapped in a bufio.Reader, mirroring C's stdio pIn
+// (fdopen "r", sqlite3_rsync.c L316): one underlying read per 4 KiB
+// chunk instead of per field.
 type Reader struct {
-	r         io.Reader
+	r         *bufio.Reader
 	bytesRead uint64  // bytes received from the stream (C nIn)
 	buf       [4]byte // framing scratch, avoids a heap allocation per call
 }
 
-// BytesRead returns the number of bytes read from the stream since
-// the Reader was created, counted exactly where C counts.
+// BytesRead returns the number of bytes read since the Reader was
+// created, counted where C counts — at the buffer boundary, not the
+// kernel (C nIn, sqlite3_rsync.c L68).
 func (r *Reader) BytesRead() uint64 {
 	return r.bytesRead
 }
 
-// NewReader returns a Reader that frames reads from r.
+// NewReader returns a Reader that frames reads from r, buffering
+// them like C's stdio pIn.
 func NewReader(r io.Reader) *Reader {
-	return &Reader{r: r}
+	return &Reader{r: bufio.NewReader(r)}
 }
 
 // ReadByte reads a single byte from the stream. Port of readByte
@@ -177,41 +206,47 @@ func (r *Reader) ReadBytes(nByte int) ([]byte, error) {
 // failures through logError and the nWrErr counter; the port returns
 // Go errors. The byte counter mirrors the C nOut counter
 // (sqlite3_rsync.c L67).
+//
+// The stream is wrapped in a bufio.Writer, mirroring C's stdio pOut
+// (fdopen "w", sqlite3_rsync.c L318): writes stay buffered until the
+// buffer fills or Flush runs; write errors surface at Flush time, or
+// at the write that spills the buffer (see the package doc).
 type Writer struct {
-	w            io.Writer
+	w            *bufio.Writer
 	bytesWritten uint64  // bytes transmitted to the stream (C nOut)
 	buf          [4]byte // framing scratch, avoids a heap allocation per call
 }
 
-// BytesWritten returns the number of bytes written to the stream since
-// the Writer was created, counted exactly where C counts.
+// BytesWritten returns the number of bytes written since the Writer
+// was created, counted where C counts — at the buffer boundary, not
+// the kernel (C nOut, sqlite3_rsync.c L67). A counted byte stays
+// counted even when a later Flush fails, like C's nOut under its
+// unchecked fflush.
 func (w *Writer) BytesWritten() uint64 {
 	return w.bytesWritten
 }
 
-// NewWriter returns a Writer that frames writes to w.
+// NewWriter returns a Writer that frames writes to w, buffering them
+// like C's stdio pOut.
 func NewWriter(w io.Writer) *Writer {
-	return &Writer{w: w}
+	return &Writer{w: bufio.NewWriter(w)}
 }
 
 // WriteByte writes a single byte to the stream. Port of writeByte
-// (sqlite3_rsync.c L1018-1022): the C function ignores the fputc
-// result; the port returns the error. C counts the byte regardless of
-// the write's outcome (L1021), and the port mirrors that.
+// (sqlite3_rsync.c L1018-1022): C ignores the fputc result; the
+// port returns the error — at WriteByte time when the spill flush
+// fails, otherwise at Flush (C's fflush is unchecked; the port
+// returns errors — a deviation, see the package doc). C counts the
+// byte regardless of the write's outcome (L1021); the port mirrors
+// that. A short write is impossible: bufio.Writer writes everything
+// or returns an error.
 func (w *Writer) WriteByte(b byte) error {
 	w.buf[0] = b
-	n, err := w.w.Write(w.buf[:1])
+	_, err := w.w.Write(w.buf[:1])
+	// C counts the byte regardless of the write's outcome
+	// (sqlite3_rsync.c L1021).
 	w.bytesWritten++
-	if err != nil {
-		return err
-	}
-	if n != 1 {
-		// The same short-write guard as WriteBytes: a writer may
-		// return fewer bytes with no error, and a silently lost
-		// message byte would hang the peer.
-		return io.ErrShortWrite
-	}
-	return nil
+	return err
 }
 
 // WriteUint32 writes a single big-endian 32-bit unsigned integer to
@@ -253,25 +288,43 @@ func (w *Writer) WritePow2(v int) error {
 }
 
 // WriteBytes writes p to the stream. Port of writeBytes
-// (sqlite3_rsync.c L1058-1066), which logs and bumps nWrErr on a short
-// write; the port reports the short write as io.ErrShortWrite.
+// (sqlite3_rsync.c L1058-1066), which logs and bumps nWrErr on a
+// short write; the port reports the failure as the error — at
+// WriteBytes time when the spill flush fails, otherwise at Flush
+// (C's fflush is unchecked — a deviation, see the package doc). The
+// buffer never returns a short count with a nil error: a short write
+// by the underlying stream surfaces as io.ErrShortWrite at Flush.
+// C counts only a full write (sqlite3_rsync.c L1060-1061).
 func (w *Writer) WriteBytes(p []byte) error {
-	n, err := w.w.Write(p)
+	_, err := w.w.Write(p)
 	if err != nil {
 		return err
-	}
-	if n != len(p) {
-		return io.ErrShortWrite
 	}
 	// C counts only a full write (sqlite3_rsync.c L1060-1061).
 	w.bytesWritten += uint64(len(p))
 	return nil
 }
 
+// Flush pushes buffered writes to the underlying stream. Port of the
+// C fflush calls (sqlite3_rsync.c L1089, L1118, L1382, L1409, L1437,
+// L1594, L1672, L1767, L1805): the roles flush only where they are
+// about to block on the peer's answer — see the package doc. C calls
+// fflush unconditionally; the port mirrors that, and write errors
+// deferred by buffering surface here.
+func (w *Writer) Flush() error {
+	return w.w.Flush()
+}
+
 // WriteMessage writes a message with a text payload: the message byte,
 // the payload length as a 32-bit number, then the payload bytes — the
 // wire format of the C *_MSG and *_ERROR messages (sqlite3_rsync.c
-// L1081-1089, L1110-1118).
+// L1081-1089, L1110-1118). On success the frame is flushed before
+// returning — C's reportError and infoMsg end with fflush(p->pOut)
+// (L1089, L1118) — so the peer receives the whole message before it
+// must answer. A failed write returns with the frame unflushed — a
+// deviation: C flushes unconditionally, even after a failed write
+// (L1088-1089); the port leaves the tail for the caller's stream
+// close (see the package doc).
 //
 // The message-type byte goes out uncounted: C sends it with putc,
 // which does not touch the nOut counter (reportError L1083-1088,
@@ -279,18 +332,22 @@ func (w *Writer) WriteBytes(p []byte) error {
 // — would diverge from C by one byte per message.
 func (w *Writer) WriteMessage(msgByte byte, payload []byte) error {
 	w.buf[0] = msgByte
-	n, err := w.w.Write(w.buf[:1])
+	_, err := w.w.Write(w.buf[:1])
 	if err != nil {
 		return err
-	}
-	if n != 1 {
-		return io.ErrShortWrite
 	}
 	err = w.WriteUint32(uint32(len(payload)))
 	if err != nil {
 		return err
 	}
-	return w.WriteBytes(payload)
+	err = w.WriteBytes(payload)
+	if err != nil {
+		return err
+	}
+	// C's reportError and infoMsg end with fflush(p->pOut)
+	// (sqlite3_rsync.c L1089, L1118): the frame goes out in full
+	// before the peer must answer.
+	return w.Flush()
 }
 
 // maxMessageLen bounds the payload of *_MSG and *_ERROR messages read

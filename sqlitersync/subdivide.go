@@ -100,7 +100,10 @@ func (s *rsync) sendHashMessages(iHash, nHash uint32) (err error) {
 	// counts (sqlite3_rsync.c L1673); the port counts the same way,
 	// even when its own write fails.
 	s.hashRounds++
-	return err
+	// C flushes the hash messages and REPLICA_READY before the
+	// origin answers (sqlite3_rsync.c L1672); deferred errors
+	// surface here.
+	return errors.Join(err, s.w.Flush())
 }
 
 // subdivideHashRange makes entries in the sendHash table to send
