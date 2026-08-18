@@ -20,6 +20,7 @@ Pure-Go port of the [sqlite3_rsync](https://sqlite.org/rsync.html) [protocol](sq
 - [Differential Test](#differential-test)
 - [The sqlite3_rsync protocol](#the-sqlite3_rsync-protocol) (see also [sqlitersync/README.md](sqlitersync/README.md))
 - [SQLite sync approaches compared](#sqlite-sync-approaches-compared)
+- [Updating repo to upstream](#updating-repo-to-upstream)
 
 ## Usage
 
@@ -94,3 +95,11 @@ Copying a live SQLite database is not a raw file copy — the WAL and `-shm` fil
 | `VACUUM INTO` | Writers never blocked, but one continuous read transaction pins the WAL snapshot, so the WAL grows on long runs | Heaviest; rebuilds every b-tree and reads the whole database | Whole database, every run | No — writes a local file |
 | Litestream | Writers never blocked, but holds a long-running read transaction that prevents other processes from checkpointing, so the WAL grows; Litestream checkpoints it itself (PASSIVE; blocking TRUNCATE only as an emergency) | Low, but continuous — tails the WAL forever | Only new WAL frames, continuously | Yes — continuous replication to S3-compatible, Azure, GCS, SFTP or local storage |
 | sqlite3_rsync | Writers never blocked; one continuous read transaction (same WAL-growth caveat); replica is read-only during the sync | Light; hashes pages and copies only changed pages, all writes land on the replica | Only changed pages plus hash exchanges — a tiny fraction when the databases are nearly identical | Yes — remote sync over SSH; local sync over a pipe; one side must be local |
+
+## Updating repo to upstream
+
+See [UPSTREAM.md](UPSTREAM.md) for updating the pinned C source, building the reference `sqlite3_rsync` binary, and re-verifying the port:
+
+```sh
+go run ./testdata/update-upstream.go
+```
