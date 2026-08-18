@@ -10,7 +10,7 @@
 [![GitHub Release](https://img.shields.io/github/v/release/caasmo/go-sqlite-rsync?style=flat)]()
 [![Built Go](https://img.shields.io/badge/built_with-Go-00ADD8.svg?style=flat)]()
 
-Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delta sync of live SQLite databases — origin/replica roles over any io.ReadWriter, transport-agnostic. Byte-exact against the reference C implementation, with a few documented deviations (see [Porting notes](#porting-notes)).
+Pure-Go port of the [sqlite3_rsync](https://sqlite.org/rsync.html) [protocol](sqlitersync/README.md): page-level, bandwidth-efficient delta sync of live SQLite databases — origin/replica roles over any io.ReadWriter, transport-agnostic. Byte-exact against the reference C implementation, with a few documented deviations (see [Porting notes](#porting-notes)).
 
 ## Contents
 
