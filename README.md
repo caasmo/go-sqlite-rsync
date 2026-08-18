@@ -15,6 +15,7 @@ Pure-Go port of the sqlite3_rsync protocol: page-level, bandwidth-efficient delt
 ## Contents
 
 - [Usage](#usage)
+- [Examples](#examples)
 - [Porting notes](#porting-notes)
 - [Differential Test](#differential-test)
 - [The sqlite3_rsync protocol](#the-sqlite3_rsync-protocol) (see also [sqlitersync/README.md](sqlitersync/README.md))
@@ -34,7 +35,20 @@ stats, err := sqlitersync.Replica(ctx, replica, "replica.db", nil)
 
 `Origin` runs on the side that owns the up-to-date database. It opens `originPath`, compares the hashes the replica sends against its own pages, and writes back only the pages that differ. `Replica` runs on the side being brought up to date. It opens `replicaPath`, sends the hashes of its pages, and applies the pages it receives in one transaction, ending as a consistent snapshot of the origin. Both take the same arguments: a `context.Context` (`nil` is fine — it is never cancelled), the `io.ReadWriter` connecting the two sides, the database path, and an `*Options` (`nil` selects the defaults — latest protocol version, WAL mode required). For a remote sync the two calls run on different machines and `rw` is the SSH channel instead of the pipe. The roles never close the stream; the caller does, and that also ends the other side's run.
 
-## Porting notes
+## Examples
+
+The [restinpieces-backup-client](https://github.com/caasmo/restinpieces-backup-client) repo ships an always-on daemon for each role:
+
+- [`cmd/sqlite-rsync-server`](https://github.com/caasmo/restinpieces-backup-client/tree/master/cmd/sqlite-rsync-server) — the origin daemon: listens on loopback, serves the database each connection names via `Origin`.
+- [`cmd/sqlite-rsync-client`](https://github.com/caasmo/restinpieces-backup-client/tree/master/cmd/sqlite-rsync-client) — the replica daemon: dials the origin on a fixed interval and syncs via `Replica`, over SSH by default or directly with `-l`.
+
+```bash
+# terminal 1 — origin: serve /tmp/origin.db on 127.0.0.1:9909
+RIP_BCK_ORIGIN_LISTEN_ADDR=127.0.0.1:9909 RIP_BCK_ORIGIN_FILE=/tmp/origin.db ./sqlite-rsync-server
+
+# terminal 2 — replica: sync into /tmp/replica/db.db
+RIP_BCK_REPLICA_LABEL=db RIP_BCK_REPLICA_DIR=/tmp/replica ./sqlite-rsync-client -l
+```
 
 This library ports the two protocol roles of the reference C program (`tool/sqlite3_rsync.c`, [source](https://sqlite.org/src/file/tool/sqlite3_rsync.c)): the origin side (L1363-1608) and the replica side (L1756-1972). It does not port the program's command-line layer, `main()` (L2068-2430). The `Origin` and `Replica` functions replace it, and three things the C program does there are deliberately left out:
 
