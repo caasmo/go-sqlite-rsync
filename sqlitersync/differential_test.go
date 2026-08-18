@@ -24,8 +24,6 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/caasmo/go-sqlite-rsync/wire"
 )
 
 // sqlite3_rsync is the absolute path of the reference sqlite3_rsync
@@ -113,54 +111,23 @@ func newPipe(t *testing.T) (read, write *os.File) {
 	return read, write
 }
 
-// pipeConn wraps the reader and writer ends of a role's connection —
-// the C process's pipe ends are two separate objects, and the role
-// API takes a single io.ReadWriter — and counts the REPLICA_CONFIG
-// and ORIGIN_DETAIL messages the role wrote. The count lives on the
-// write side only, because a read can come back in pieces and a stray
-// byte could look like 0x67 or 0x47 by accident. Spotting them is
-// easy: every message starts by putting one byte into the pipe that
-// says which kind of message it is, so a single byte of 0x67 or 0x47
-// can only be one of these two messages. They are the two messages a
-// sync uses to change the size of a hash range, and they exist only
-// in the agghash round.
+// pipeConn joins the two pipe ends of a role's connection into one
+// io.ReadWriter for the role API: the C process's pipe ends are two
+// separate objects — the role reads the process's stdout and writes
+// its stdin.
 type pipeConn struct {
-	read            io.Reader
-	write           io.Writer
-	agghashMessages int64 // REPLICA_CONFIG and ORIGIN_DETAIL messages written: they exist only in the agghash round
+	read  io.Reader
+	write io.Writer
 }
 
-// Read reads from the wrapped reader.
+// Read reads from the child's stdout.
 func (c *pipeConn) Read(p []byte) (int, error) {
 	return c.read.Read(p)
 }
 
-// Write writes to the wrapped writer, counting a single-byte
-// REPLICA_CONFIG or ORIGIN_DETAIL message as an agghash message.
+// Write writes to the child's stdin.
 func (c *pipeConn) Write(p []byte) (int, error) {
-	n, err := c.write.Write(p)
-	if n == 1 && (p[0] == wire.ReplicaConfig || p[0] == wire.OriginDetail) {
-		c.agghashMessages++
-	}
-	return n, err
-}
-
-// traffic is the wire traffic of one differential run: the number of
-// REPLICA_CONFIG and ORIGIN_DETAIL messages the role wrote — the
-// signature of the agghash round, which only the differential harness
-// measures. The run's byte counters live in the result's Stats.
-type traffic struct {
-	agghashMessages int64
-}
-
-// differentialResult is what one differential run produced: the
-// shared run result plus the run's agghash-round traffic, which the
-// harness measures with pipeConn. The sync suite's runs do not
-// measure it, so the shared result carries no traffic; the asserts
-// that read it live on this type.
-type differentialResult struct {
-	result
-	traffic traffic
+	return c.write.Write(p)
 }
 
 // syncGoWithC runs a real sync: the Go library plays one role, the C
@@ -168,11 +135,10 @@ type differentialResult struct {
 // "origin" or "replica"; the C binary always plays the other.
 //
 // It returns the run's result: the scenario it ran, the Go role's
-// error (nil on a clean run), the C process's stderr, the run's
-// per-run statistics and its agghash-round traffic. Harness failures
-// — the process not starting, or not exiting after a clean Go run —
-// fail the test directly.
-func syncGoWithC(t *testing.T, goRole string, sc *scenario) differentialResult {
+// error (nil on a clean run), the C process's stderr and the run's
+// per-run statistics. Harness failures — the process not starting, or
+// not exiting after a clean Go run — fail the test directly.
+func syncGoWithC(t *testing.T, goRole string, sc *scenario) result {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -283,28 +249,25 @@ func syncGoWithC(t *testing.T, goRole string, sc *scenario) differentialResult {
 		t.Fatalf("C %s: %v\nstderr:\n%s", otherRole, waitErr, stderr.String())
 	}
 
-	return differentialResult{
-		result: result{
-			t:        t,
-			scenario: sc,
-			goErr:    goErr,
-			stderr:   stderr.String(),
-			stats:    goStats,
-		},
-		traffic: traffic{agghashMessages: conn.agghashMessages},
+	return result{
+		t:        t,
+		scenario: sc,
+		goErr:    goErr,
+		stderr:   stderr.String(),
+		stats:    goStats,
 	}
 }
 
 // syncGoToC runs the scenario with the Go library as origin and the C
 // binary as replica, and returns the run's result.
-func syncGoToC(t *testing.T, sc *scenario) differentialResult {
+func syncGoToC(t *testing.T, sc *scenario) result {
 	t.Helper()
 	return syncGoWithC(t, originRole, sc)
 }
 
 // syncCToGo runs the scenario with the C binary as origin and the Go
 // library as replica, and returns the run's result.
-func syncCToGo(t *testing.T, sc *scenario) differentialResult {
+func syncCToGo(t *testing.T, sc *scenario) result {
 	t.Helper()
 	return syncGoWithC(t, replicaRole, sc)
 }
@@ -463,7 +426,7 @@ func (r result) assertReplicaAgghashSameAs(referenceReplicaPath string) {
 // traffic — must equal the other run's BytesSent — the Go replica's
 // traffic. Any divergence — a resend of pages C would not send, a
 // hash C would not send — breaks the equality.
-func (r differentialResult) assertTrafficSameAs(other differentialResult) {
+func (r result) assertTrafficSameAs(other result) {
 	r.t.Helper()
 	if r.stats.BytesSent != other.stats.BytesReceived {
 		r.t.Fatalf("Go origin sent %d bytes, C origin sent %d", r.stats.BytesSent, other.stats.BytesReceived)
@@ -473,35 +436,68 @@ func (r differentialResult) assertTrafficSameAs(other differentialResult) {
 	}
 }
 
-// assertAgghashRoundRan fails the test unless the run's wire carried
-// REPLICA_CONFIG messages — the grouped round's signature on the
-// replica side. Only the agghash scenarios call it, and only on the
-// Go-replica run: REPLICA_CONFIG is the deterministic signal that
-// the grouped round engaged. The origin's side of the round —
-// ORIGIN_DETAIL refinement — is scenario-dependent (absent in
-// replica-agghash-same, where every chunk hash matches) and is pinned
-// by assertTrafficSameAs instead, whose byte-for-byte equality with C
-// proves the same refinement rounds ran. The flat scenarios call the
-// complementary assertAgghashRoundNotRan.
-func (r differentialResult) assertAgghashRoundRan() {
+// hashFrameBytes is the wire size of a REPLICA_HASH frame: the type
+// byte plus the 20-byte hash (sqlite3_rsync.c L1657-1663). The round
+// asserts decompose the replica's write side into its frames with it.
+const hashFrameBytes = 21
+
+// configFrameBytes is the wire size of a REPLICA_CONFIG frame: the
+// type byte plus the two 4-byte range numbers (sqlite3_rsync.c
+// L1645-1652). It is the grouped agghash round's only signature: the
+// flat round never changes a hash range.
+const configFrameBytes = 9
+
+// assertAgghashRoundRan fails the test unless the run's statistics
+// show the grouped agghash round on the replica side. Two independent
+// signs must hold:
+//
+//   - HashMessages < PageCount: the replica hashed its pages in
+//     chunks, so it sent fewer hash messages than the origin has
+//     pages. A flat round sends one hash per page, so the two counts
+//     match; PageCount is the origin's count, and the agghash
+//     fixtures are same-size, so the comparison is exact.
+//   - BytesSent >= 21*HashMessages + HashRounds + 9: the replica's
+//     write side is the sum of its frames — the hash frames (21
+//     bytes each), the REPLICA_READY frames (1 byte per round) and
+//     the REPLICA_CONFIG frames (9 bytes each) of the grouped round.
+//     A flat round carries no config frames, so its write side is
+//     exactly 21*HashMessages + HashRounds.
+//
+// Only the agghash scenarios call it, and only on the Go-replica run
+// (syncCToGo): the grouped round's config frames are the
+// deterministic signal that it engaged. The origin's side of the
+// round — the ORIGIN_DETAIL refinement — is scenario-dependent
+// (absent in replica-agghash-same, where every chunk hash matches)
+// and is pinned by assertTrafficSameAs instead, whose byte-for-byte
+// equality with C proves the same refinement rounds ran. The flat
+// scenarios call the complementary assertAgghashRoundNotRan.
+func (r result) assertAgghashRoundRan() {
 	r.t.Helper()
-	if r.traffic.agghashMessages == 0 {
-		r.t.Fatalf("Go replica sent no REPLICA_CONFIG/ORIGIN_DETAIL: the agghash round did not run")
+	flatBytes := hashFrameBytes*r.stats.HashMessages + uint64(r.stats.HashRounds)
+	if r.stats.HashMessages < uint64(r.stats.PageCount) && r.stats.BytesSent >= flatBytes+configFrameBytes {
+		return
 	}
+	r.t.Fatalf("Go replica did not run the agghash round: HashMessages=%d, PageCount=%d, BytesSent=%d, want HashMessages < PageCount and BytesSent >= %d",
+		r.stats.HashMessages, r.stats.PageCount, r.stats.BytesSent, flatBytes+configFrameBytes)
 }
 
-// assertAgghashRoundNotRan fails the test unless the run's wire
-// carried no REPLICA_CONFIG or ORIGIN_DETAIL messages — the signature
-// of the grouped agghash round. Every flat scenario calls it: their
-// replicas stay under the 100-page threshold, so the hash round is the
-// flat page-by-page round and any grouped message is a regression.
-// (A spurious grouped round would also break assertTrafficSameAs — it
-// inflates only the one combo that runs it — but this pins the
-// flatness directly, with a message that says which round ran.)
-func (r differentialResult) assertAgghashRoundNotRan() {
+// assertAgghashRoundNotRan fails the test unless the run's statistics
+// show the flat round: the replica's write side is exactly its hash
+// frames and REPLICA_READY — BytesSent == 21*HashMessages +
+// HashRounds — so any excess is the REPLICA_CONFIG frames' 9 bytes
+// each, and the grouped round ran. Every flat scenario calls it:
+// their replicas stay under the 100-page threshold, so the hash round
+// is the flat page-by-page round and any grouped message is a
+// regression. (A spurious grouped round would also break
+// assertTrafficSameAs — it inflates only the one combo that runs it —
+// but this pins the flatness directly, with a message that says which
+// round ran.)
+func (r result) assertAgghashRoundNotRan() {
 	r.t.Helper()
-	if r.traffic.agghashMessages > 0 {
-		r.t.Fatalf("Go replica sent %d REPLICA_CONFIG/ORIGIN_DETAIL messages, want none (flat round)", r.traffic.agghashMessages)
+	flatBytes := hashFrameBytes*r.stats.HashMessages + uint64(r.stats.HashRounds)
+	if r.stats.BytesSent != flatBytes {
+		r.t.Fatalf("Go replica wrote %d bytes, want %d: the flat round's write side is exactly the hash frames plus REPLICA_READY",
+			r.stats.BytesSent, flatBytes)
 	}
 }
 
@@ -543,12 +539,14 @@ var agghashScenarios = []func(t *testing.T, dir string) *scenario{
 // and discards the reference replica. The only way the Go roles can
 // satisfy that is by speaking the same protocol and hashing the same
 // way, so this proves wire interop and hash equivalence at once. The
-// wire also proves which round ran: the flat scenarios must show no
-// REPLICA_CONFIG/ORIGIN_DETAIL (their replicas stay under the 100-page
-// threshold), and the agghash scenarios must show it — a regression
-// that engages the grouped round where the original suite did not
-// fails the suite. The reference binary is a hard requirement (see
-// checkReferenceBinary); the groups run sequentially.
+// runs' statistics also prove which round ran: the agghash scenarios'
+// replicas hash their pages in chunks, so their hash-message count
+// stays far below the page count and their write side carries the
+// REPLICA_CONFIG frames (assertAgghashRoundRan), and the flat
+// scenarios must show neither (assertAgghashRoundNotRan) — a
+// regression that engages the grouped round where the original suite
+// did not fails the suite. The reference binary is a hard requirement
+// (see checkReferenceBinary); the groups run sequentially.
 func TestDifferential(t *testing.T) {
 	checkReferenceBinary(t)
 

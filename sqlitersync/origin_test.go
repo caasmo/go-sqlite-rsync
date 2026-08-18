@@ -2,7 +2,6 @@ package sqlitersync
 
 import (
 	"bytes"
-	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -396,12 +395,9 @@ func TestOriginUnknownMessage(t *testing.T) {
 	o, done := newScriptedReplica(t, s)
 
 	o.readBegin()
-	err := o.w.WriteByte(0xFF)
-	if err != nil {
-		t.Fatalf("WriteByte: %v", err)
-	}
+	o.sendByte(0xFF)
 	msg := o.readError()
-	err = <-done
+	err := <-done
 	if err == nil {
 		t.Fatal("originSide succeeded, want unknown-message error")
 	}
@@ -428,28 +424,15 @@ func originPageHash(pages [][]byte, pgno uint32) []byte {
 // scripted: each test decides what to send and what to expect, instead
 // of computing hashes like the real replica.
 type scriptedReplica struct {
-	t    *testing.T
-	conn net.Conn
-	r    *wire.Reader
-	w    *wire.Writer
+	*scriptedPeer
 }
 
 // newScriptedReplica connects to an originSide run and returns the
 // replica side of the pipe plus the channel carrying the run's result.
 func newScriptedReplica(t *testing.T, s *rsync) (*scriptedReplica, <-chan error) {
 	t.Helper()
-	originConn, replicaConn := net.Pipe()
-	s.r = wire.NewReader(originConn)
-	s.w = wire.NewWriter(originConn)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- originSide(s)
-		_ = originConn.Close()
-	}()
-	t.Cleanup(func() {
-		_ = replicaConn.Close()
-	})
-	return &scriptedReplica{t: t, conn: replicaConn, r: wire.NewReader(replicaConn), w: wire.NewWriter(replicaConn)}, errCh
+	p, errCh := newScriptedPeer(t, s, originSide)
+	return &scriptedReplica{p}, errCh
 }
 
 // readBegin reads the origin's ORIGIN_BEGIN message and returns its
@@ -483,32 +466,30 @@ func (o *scriptedReplica) readBegin() (protocol byte, pageSize int, pageCount ui
 // counter-proposal (sqlite3_rsync.c L1803-1805).
 func (o *scriptedReplica) sendReplicaBegin(protocol byte) {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.ReplicaBegin)
-	if err != nil {
-		o.t.Fatalf("ReplicaBegin: %v", err)
-	}
-	err = o.w.WriteByte(protocol)
-	if err != nil {
-		o.t.Fatalf("protocol: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		err := w.WriteByte(wire.ReplicaBegin)
+		if err != nil {
+			return err
+		}
+		return w.WriteByte(protocol)
+	})
 }
 
 // sendConfig sends REPLICA_CONFIG announcing the range of the next
 // hash (sqlite3_rsync.c L1645-1652).
 func (o *scriptedReplica) sendConfig(iHash, nHash uint32) {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.ReplicaConfig)
-	if err != nil {
-		o.t.Fatalf("ReplicaConfig: %v", err)
-	}
-	err = o.w.WriteUint32(iHash)
-	if err != nil {
-		o.t.Fatalf("iHash: %v", err)
-	}
-	err = o.w.WriteUint32(nHash)
-	if err != nil {
-		o.t.Fatalf("nHash: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		err := w.WriteByte(wire.ReplicaConfig)
+		if err != nil {
+			return err
+		}
+		err = w.WriteUint32(iHash)
+		if err != nil {
+			return err
+		}
+		return w.WriteUint32(nHash)
+	})
 }
 
 // sendHash sends REPLICA_HASH with the given 20-byte hash
@@ -518,27 +499,25 @@ func (o *scriptedReplica) sendHash(h []byte) {
 	if len(h) != 20 {
 		o.t.Fatalf("hash is %d bytes, want 20", len(h))
 	}
-	err := o.w.WriteByte(wire.ReplicaHash)
-	if err != nil {
-		o.t.Fatalf("ReplicaHash: %v", err)
-	}
-	err = o.w.WriteBytes(h)
-	if err != nil {
-		o.t.Fatalf("hash: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		err := w.WriteByte(wire.ReplicaHash)
+		if err != nil {
+			return err
+		}
+		return w.WriteBytes(h)
+	})
 }
 
 // sendReady sends REPLICA_READY (sqlite3_rsync.c L1669-1675).
 func (o *scriptedReplica) sendReady() {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.ReplicaReady)
-	if err != nil {
-		o.t.Fatalf("ReplicaReady: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		return w.WriteByte(wire.ReplicaReady)
+	})
 }
 
 // sendError sends REPLICA_ERROR with the given text (sqlite3_rsync.c
-// L1083-1088).
+// L1083-1088): WriteMessage flushes its own frame.
 func (o *scriptedReplica) sendError(text string) {
 	o.t.Helper()
 	err := o.w.WriteMessage(wire.ReplicaError, []byte(text))
@@ -550,10 +529,9 @@ func (o *scriptedReplica) sendError(text string) {
 // sendEnd sends REPLICA_END (sqlite3_rsync.c L1766).
 func (o *scriptedReplica) sendEnd() {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.ReplicaEnd)
-	if err != nil {
-		o.t.Fatalf("ReplicaEnd: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		return w.WriteByte(wire.ReplicaEnd)
+	})
 }
 
 // readDetail reads an ORIGIN_DETAIL message and returns the requested

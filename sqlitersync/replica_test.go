@@ -3,7 +3,6 @@ package sqlitersync
 import (
 	"bytes"
 	"database/sql"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -504,12 +503,9 @@ func TestReplicaUnknownMessage(t *testing.T) {
 	s := &rsync{replicaPath: replicaPath, protocol: wire.ProtocolVersion}
 	o, done := newScriptedOrigin(t, s)
 
-	err := o.w.WriteByte(0xFF)
-	if err != nil {
-		t.Fatalf("WriteByte: %v", err)
-	}
+	o.sendByte(0xFF)
 	msg := o.readError()
-	err = <-done
+	err := <-done
 	if err == nil {
 		t.Fatal("replicaSide succeeded, want unknown-message error")
 	}
@@ -523,49 +519,36 @@ func TestReplicaUnknownMessage(t *testing.T) {
 // scripted: each test decides what to send and what to expect, instead
 // of computing hashes like the real origin (step 5).
 type scriptedOrigin struct {
-	t *testing.T
-	r *wire.Reader
-	w *wire.Writer
+	*scriptedPeer
 }
 
 // newScriptedOrigin connects to a replicaSide run and returns the
 // origin side of the pipe plus the channel carrying the run's result.
 func newScriptedOrigin(t *testing.T, s *rsync) (*scriptedOrigin, <-chan error) {
 	t.Helper()
-	originConn, replicaConn := net.Pipe()
-	s.r = wire.NewReader(replicaConn)
-	s.w = wire.NewWriter(replicaConn)
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- replicaSide(s)
-		_ = replicaConn.Close()
-	}()
-	t.Cleanup(func() {
-		_ = originConn.Close()
-	})
-	return &scriptedOrigin{t: t, r: wire.NewReader(originConn), w: wire.NewWriter(originConn)}, errCh
+	p, errCh := newScriptedPeer(t, s, replicaSide)
+	return &scriptedOrigin{p}, errCh
 }
 
 // begin sends ORIGIN_BEGIN with the given protocol, page size and
 // page count (sqlite3_rsync.c L1405-1408).
 func (o *scriptedOrigin) begin(protocol byte, pageSize int, pageCount uint32) {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.OriginBegin)
-	if err != nil {
-		o.t.Fatalf("OriginBegin: %v", err)
-	}
-	err = o.w.WriteByte(protocol)
-	if err != nil {
-		o.t.Fatalf("protocol: %v", err)
-	}
-	err = o.w.WritePow2(pageSize)
-	if err != nil {
-		o.t.Fatalf("page size: %v", err)
-	}
-	err = o.w.WriteUint32(pageCount)
-	if err != nil {
-		o.t.Fatalf("page count: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		err := w.WriteByte(wire.OriginBegin)
+		if err != nil {
+			return err
+		}
+		err = w.WriteByte(protocol)
+		if err != nil {
+			return err
+		}
+		err = w.WritePow2(pageSize)
+		if err != nil {
+			return err
+		}
+		return w.WriteUint32(pageCount)
+	})
 }
 
 // readReplicaBegin reads a REPLICA_BEGIN protocol counter-proposal and
@@ -625,40 +608,37 @@ func (o *scriptedOrigin) readReady() int {
 // (sqlite3_rsync.c L1578-1580).
 func (o *scriptedOrigin) page(pgno uint32, data []byte) {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.OriginPage)
-	if err != nil {
-		o.t.Fatalf("OriginPage: %v", err)
-	}
-	err = o.w.WriteUint32(pgno)
-	if err != nil {
-		o.t.Fatalf("pgno: %v", err)
-	}
-	err = o.w.WriteBytes(data)
-	if err != nil {
-		o.t.Fatalf("page data: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		err := w.WriteByte(wire.OriginPage)
+		if err != nil {
+			return err
+		}
+		err = w.WriteUint32(pgno)
+		if err != nil {
+			return err
+		}
+		return w.WriteBytes(data)
+	})
 }
 
 // txn sends an ORIGIN_TXN message (sqlite3_rsync.c L1587-1588).
 func (o *scriptedOrigin) txn(pageCount uint32) {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.OriginTxn)
-	if err != nil {
-		o.t.Fatalf("OriginTxn: %v", err)
-	}
-	err = o.w.WriteUint32(pageCount)
-	if err != nil {
-		o.t.Fatalf("page count: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		err := w.WriteByte(wire.OriginTxn)
+		if err != nil {
+			return err
+		}
+		return w.WriteUint32(pageCount)
+	})
 }
 
 // end sends ORIGIN_END (sqlite3_rsync.c L1592).
 func (o *scriptedOrigin) end() {
 	o.t.Helper()
-	err := o.w.WriteByte(wire.OriginEnd)
-	if err != nil {
-		o.t.Fatalf("OriginEnd: %v", err)
-	}
+	o.sendFrame(func(w *wire.Writer) error {
+		return w.WriteByte(wire.OriginEnd)
+	})
 }
 
 // readError reads a REPLICA_ERROR message and returns its text.

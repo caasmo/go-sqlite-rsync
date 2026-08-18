@@ -8,11 +8,14 @@ package sqlitersync
 import (
 	"bytes"
 	"database/sql"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/caasmo/go-sqlite-rsync/hash"
+	"github.com/caasmo/go-sqlite-rsync/wire"
 )
 
 // dbPageInfo opens a database file and returns its page size and page
@@ -439,4 +442,78 @@ func (r result) assertRowsSame() {
 	if got != want {
 		r.t.Fatalf("replica has %d rows, want %d", got, want)
 	}
+}
+
+// scriptedTimeout bounds one scripted role run: a role that never
+// answers — a missing flush, a protocol hang — closes the pipe at
+// the deadline, so the blocked read fails and the test fails fast
+// instead of hanging the suite.
+const scriptedTimeout = 5 * time.Second
+
+// scriptedPeer is the skeleton of the scripted test peers
+// (scriptedReplica, scriptedOrigin): the connection to the role under
+// test, the peer's reader and writer. The peer is a caller of the
+// wire package, so it follows the caller-side flush discipline (see
+// the wire package doc): every frame goes out through sendFrame,
+// which flushes it — a message the role must answer is on the wire
+// before the peer awaits the answer.
+type scriptedPeer struct {
+	t    *testing.T
+	conn net.Conn
+	r    *wire.Reader
+	w    *wire.Writer
+}
+
+// newScriptedPeer connects a scripted peer to a role run: it opens
+// the pipe, wires the role's reader and writer to its own end, and
+// runs the side function (originSide or replicaSide) in a goroutine.
+// The run is bounded: when scriptedTimeout expires, both pipe ends
+// are closed, unblocking the reads on both sides, so a role that
+// never answers — a missing flush, a protocol hang — fails the test
+// fast instead of hanging the suite. The cleanup stops the timer and
+// closes the pipe, releasing the role goroutine.
+func newScriptedPeer(t *testing.T, s *rsync, side func(*rsync) error) (*scriptedPeer, <-chan error) {
+	t.Helper()
+	roleConn, peerConn := net.Pipe()
+	s.r = wire.NewReader(roleConn)
+	s.w = wire.NewWriter(roleConn)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- side(s)
+		_ = roleConn.Close()
+	}()
+	timer := time.AfterFunc(scriptedTimeout, func() {
+		_ = roleConn.Close()
+		_ = peerConn.Close()
+	})
+	t.Cleanup(func() {
+		timer.Stop()
+		_ = roleConn.Close()
+		_ = peerConn.Close()
+	})
+	return &scriptedPeer{t: t, conn: peerConn, r: wire.NewReader(peerConn), w: wire.NewWriter(peerConn)}, errCh
+}
+
+// sendFrame writes one frame to the role under test and flushes it:
+// the wire package's caller-side flush discipline — a message the
+// role must answer is on the wire before the peer awaits the answer
+// (see wire.Writer.Flush). Every peer write goes through this one
+// primitive, so no send can strand a frame in the buffer.
+func (o *scriptedPeer) sendFrame(f func(w *wire.Writer) error) {
+	o.t.Helper()
+	if err := f(o.w); err != nil {
+		o.t.Fatalf("send frame: %v", err)
+	}
+	if err := o.w.Flush(); err != nil {
+		o.t.Fatalf("Flush: %v", err)
+	}
+}
+
+// sendByte sends one raw message byte — the unknown-message probe of
+// the *_UnknownMessage tests — flushed like every other frame.
+func (o *scriptedPeer) sendByte(b byte) {
+	o.t.Helper()
+	o.sendFrame(func(w *wire.Writer) error {
+		return w.WriteByte(b)
+	})
 }
