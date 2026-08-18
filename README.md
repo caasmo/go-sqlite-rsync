@@ -50,6 +50,8 @@ RIP_BCK_ORIGIN_LISTEN_ADDR=127.0.0.1:9909 RIP_BCK_ORIGIN_FILE=/tmp/origin.db ./s
 RIP_BCK_REPLICA_LABEL=db RIP_BCK_REPLICA_DIR=/tmp/replica ./sqlite-rsync-client -l
 ```
 
+## Porting notes
+
 This library ports the two protocol roles of the reference C program (`tool/sqlite3_rsync.c`, [source](https://sqlite.org/src/file/tool/sqlite3_rsync.c)): the origin side (L1363-1608) and the replica side (L1756-1972). It does not port the program's command-line layer, `main()` (L2068-2430). The `Origin` and `Replica` functions replace it, and three things the C program does there are deliberately left out:
 
 - **Starting the other side.** The C tool accepts filenames like `user@host:file`, launches the remote program itself over SSH (`popen2`, with the `-ssh`, `-port`, `-exe`, `-remote-debugfile`, `-logfile` and `-arg-escape-check` options) and connects the pair over pipes (L2042-2067, L2255-2383). The library takes a connected `io.ReadWriter` for each side — the caller decides the transport: a pipe, an SSH channel, anything readable and writable.
